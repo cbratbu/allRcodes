@@ -1,0 +1,342 @@
+---
+title: "LUQ/BAT-C Linear & Mixed Effects Models"
+author: "Isaac Falconer"
+date: "2/16/2021"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r echo=FALSE, include=FALSE}
+# Load required packages
+#library(stats)
+#library(factoextra)
+#library(clusterSim)
+#library(tibble)
+#library(analogue)
+#library(gplots)
+library(lme4)
+library(nlme)
+library(lmerTest)
+library(MuMIn)
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(cAIC4)
+library(MASS)
+library(glmmLasso)
+library(performance)
+```
+
+# L1 Models
+
+```{r echo=FALSE, include=FALSE}
+## Calculate individual loading scores
+
+## Read in LUQ data
+#luq_L1 = read.csv('LUQ_L1.csv', header = T)
+#luq_L1_data = luq_L1[3:10]
+#L1_PCA_loadings <- read.csv('l1_luq_loadings_manny.csv')
+
+## Calculate loading scores from normalized LUQ data and Manny's PCA loadings
+#luq_L1_data.norm <- data.Normalization(luq_L1_data, type="n1", normalization="column")
+#L1_scores <- data.matrix(luq_L1_data.norm) %*% data.matrix(L1_PCA_loadings[2:4])
+```
+
+
+
+```{r echo=FALSE}
+# Read in L1 data with composite scores
+setwd("R:/KiranLab4/Students/Isaac Falconer/ProCoM/BAT-C - LUQ Analysis/Analyses including older data/Mixed Effects Models")
+#L1_data <- read_excel('L1_data_mixed_effects_model_weighted_composite_pre_post.xlsx')
+all_data <- read_excel('all_data_mixed_effects_model_weighted_composite_pre_post.xlsx')
+```
+
+```{r}
+# Null model
+model_null <- lm(composite ~ 1, data=all_data)
+#model_null <- lmer(composite ~ 1 + (1|patient), data=all_data)
+summary(model_null)
+```
+
+
+## Model 0
+```{r}
+model_step = step(model_null, scope = composite ~ time_dummy * WAB_AQ_english * L1 * direction * L1_Background_RC1 * L1_Use_RC2 * L1_Environment_RC3 * L2_Background_Environment_RC1 * L2_Use_RC2, direction="both")
+#model_step <- stepcAIC(model_null, direction = "both", scope = composite ~ time_dummy * WAB_AQ_english * L1 * direction * L1_Background_RC1 * L1_Use_RC2 * L1_Environment_RC3 * L2_Background_Environment_RC1 * L2_Use_RC2 + (1|patient), trace = TRUE)
+summary(model_step)
+```
+
+
+## Backward Translation
+
+```{r echo=FALSE}
+backward_data <- all_data[1:46,]
+
+```
+
+```{r}
+# Null model
+backward_model_null <- lm(composite ~ 1, data=backward_data)
+
+backward_model_0 = step(backward_model_null, scope = composite ~ time_dummy * WAB_AQ_english * L1 * L1_Background_RC1 * L1_Use_RC2 * L1_Environment_RC3 * L2_Background_Environment_RC1 * L2_Use_RC2, direction="forward")
+summary(backward_model_0)
+```
+
+```{r}
+
+backward.lmer <- lmer(composite ~ WAB_AQ_english + L2_Use_RC2 + L1_Environment_RC3 + 
+    L1_Background_RC1, data = backward_data)
+
+````
+
+
+## Forward Translation
+
+```{r echo=FALSE}
+forward_data <- all_data[47:92,]
+```
+
+
+```{r}
+# Null model
+forward_model_null <- lm(composite ~ 1, data=forward_data)
+
+forward_model_0 = step(forward_model_null, scope = composite ~ time_dummy * WAB_AQ_english * L1 * L1_Background_RC1 * L1_Use_RC2 * L1_Environment_RC3 * L2_Background_Environment_RC1 * L2_Use_RC2, direction="both")
+summary(forward_model_0)
+```
+
+```{r}
+backward_model_step_mixed <- lme(composite ~ WAB_AQ_english + L2_Use_RC2 + L1_Environment_RC3, random = (~1|patient), data = backward_data)
+summary(backward_model_step_mixed)
+```
+
+
+
+```{r}
+forward_model_step_mixed <- lme(composite ~ time_dummy + WAB_AQ_english + L2_Background_Environment_RC1, random = (~1|patient), data = forward_data)
+summary(forward_model_step_mixed)
+```
+
+
+
+
+```{r}
+backward.lmer <- lmer(composite ~ (time_dummy +
+                      WAB_AQ_english +
+                      L1 + 
+                      L1_Background_RC1 +
+                      L1_Use_RC2 + 
+                      L1_Environment_RC3 +
+                      L2_Background_Environment_RC1 +
+                      L2_Use_RC2)^2 +
+                      # time_dummy:WAB_AQ_english +
+                      # time_dummy:L1 + 
+                      # time_dummy:L1_Background_RC1 +
+                      # time_dummy:L1_Use_RC2 + 
+                      # time_dummy:L1_Environment_RC3 +
+                      # time_dummy:L2_Background_Environment_RC1 +
+                      # time_dummy:L2_Use_RC2 +
+                      (1|patient),
+                      data=backward_data)
+
+backward.lmer_step = lmerTest::step(backward.lmer, direction="backward", trace=TRUE)
+backward.lmer_step
+```
+
+```{r}
+
+backward.lmer_2 <- lmer(composite ~ time_dummy + WAB_AQ_english + L1_Environment_RC3 + 
+    L2_Use_RC2 + (1 | patient), data=backward_data)
+
+summary(backward.lmer_2)
+
+compare_performance(backward.lmer_2,backward)
+
+```
+
+```{r}
+backward.lmer_final <- lmer(composite ~ time_dummy + WAB_AQ_english + L1_Environment_RC3 + 
+    L2_Use_RC2 + (1 | patient), data=backward_data)
+summary(backward.lmer_final)
+```
+
+```{r}
+forward.lmer <- lmer(composite ~ time_dummy +
+                      WAB_AQ_english +
+                      L1 + 
+                      L1_Background_RC1 +
+                      L1_Use_RC2 + 
+                      L1_Environment_RC3 +
+                      L2_Background_Environment_RC1 +
+                      L2_Use_RC2 +
+                      time_dummy:WAB_AQ_english +
+                      time_dummy:L1 + 
+                      time_dummy:L1_Background_RC1 +
+                      time_dummy:L1_Use_RC2 + 
+                      time_dummy:L1_Environment_RC3 +
+                      time_dummy:L2_Background_Environment_RC1 +
+                      time_dummy:L2_Use_RC2 +
+                      (1|patient),
+                      data=forward_data)
+
+forward.lmer_step = lmerTest::step(forward.lmer, direction="backward", trace=TRUE)
+forward.lmer_step
+```
+
+```{r}
+forward.lmer_final <- lmer(composite ~ time_dummy + WAB_AQ_english + (1 | patient), data=forward_data)
+summary(forward.lmer_final)
+```
+
+## Individual Variables
+
+### Backward Translation
+
+```{r}
+LUQ_L1 <- read.csv("LUQ_L1.csv", header = T)
+LUQ_L2 <- read.csv("LUQ_L2.csv", header = T)
+backward_indiv <- merge(backward_data, LUQ_L1, by="ID",all.x=TRUE,all.y=TRUE)
+backward_indiv <- merge(backward_indiv, LUQ_L2, by="ID",all.x=TRUE,all.y=TRUE)
+
+# Null Model
+backward_indiv_null <- lm(composite ~ 1, data=backward_indiv)
+
+backward_model_1 = step(backward_indiv_null, scope = composite ~ time_dummy + WAB_AQ_english + L1 + L1_UsagePre + L1_UsagePost + L1_Family + L1_Edu + L1_Exposure + L1_Confidence + L1_LARpre + L1_LARpost + L2_AoA + L2_PreLAR + L2_PostLAR + L2_PreUse + L2_Fam + L2_Edu + L2_Exposure + L2_Conf, direction="forward")
+summary(backward_model_1)
+```
+
+```{r}
+
+backward_indiv.lmer_0 <- lmer(composite ~ WAB_AQ_english + L1_UsagePost + L1_Family + L2_PreLAR + L2_Conf + (1|patient), data=backward_indiv)
+
+summary(backward_indiv.lmer_0)
+
+```
+
+### Forward Translation
+
+```{r}
+
+LUQ_L1 <- read.csv("LUQ_L1.csv", header = T)
+LUQ_L2 <- read.csv("LUQ_L2.csv", header = T)
+forward_indiv <- merge(forward_data, LUQ_L1, by="ID",all.x=TRUE,all.y=TRUE)
+forward_indiv <- merge(forward_indiv, LUQ_L2, by="ID",all.x=TRUE,all.y=TRUE)
+
+# Null Model
+forward_indiv_null <- lm(composite ~ 1, data=forward_indiv)
+
+forward_model_1 = step(forward_indiv_null, scope = composite ~ time_dummy + WAB_AQ_english + L1 + L1_UsagePre + L1_UsagePost + L1_Family + L1_Edu + L1_Exposure + L1_Confidence + L1_LARpre + L1_LARpost + L2_AoA + L2_PreLAR + L2_PostLAR + L2_PreUse + L2_Fam + L2_Edu + L2_Exposure + L2_Conf, direction="forward")
+summary(forward_model_1)
+```
+```{r}
+
+forward_indiv.lmer_0 <- lmer(composite ~ WAB_AQ_english + L2_Conf + L2_PreLAR + 
+    L2_AoA + (1|patient), data=forward_indiv)
+
+summary(forward_indiv.lmer_0)
+
+```
+
+
+## Mixed Effects Models w/ Individual Variables
+
+### Backward
+
+```{r}
+backward_indiv.lmer <- lmer(composite ~ time_dummy +
+                              WAB_AQ_english +
+                              L1 +
+                              L1_UsagePre +
+                              L1_UsagePost +
+                              L1_Family +
+                              L1_Edu +
+                              L1_Exposure +
+                              L1_Confidence +
+                              L1_LARpre +
+                              L1_LARpost +
+                              L2_AoA +
+                              L2_PreLAR +
+                              L2_PostLAR +
+                              L2_PreUse +
+                              L2_Fam +
+                              L2_Edu +
+                              L2_Exposure +
+                              L2_Conf +
+                              # time_dummy:L1_UsagePre +
+                              # time_dummy:L1_UsagePost +
+                              # time_dummy:L1_Family +
+                              # time_dummy:L1_Edu +
+                              # time_dummy:L1_Exposure +
+                              # time_dummy:L1_Confidence +
+                              # time_dummy:L1_LARpre +
+                              # time_dummy:L1_LARpost +
+                              # time_dummy:L2_AoA +
+                              # time_dummy:L2_PreLAR +
+                              # time_dummy:L2_PostLAR +
+                              # time_dummy:L2_PreUse +
+                              # time_dummy:L2_Fam +
+                              # time_dummy:L2_Edu +
+                              # time_dummy:L2_Exposure +
+                              # time_dummy:L2_Conf +
+                              (1|patient),
+                            data=backward_indiv)
+
+backward_indiv.lmer_step = lmerTest::step(backward_indiv.lmer, direction="backward", trace=TRUE)
+backward_indiv.lmer_step
+```
+
+```{r}
+backward_indiv.lmer_final <- lmer(composite ~ time_dummy + WAB_AQ_english + L1_UsagePre + L1_Edu + L1_Exposure + L2_PreUse + L2_Edu + L2_Exposure + (1 | patient), data=backward_indiv)
+summary(backward_indiv.lmer_final)
+```
+
+### Forward
+
+```{r}
+forward_indiv.lmer <- lmer(composite ~ time_dummy +
+                              WAB_AQ_english +
+                              L1 +
+                              L1_UsagePre +
+                              L1_UsagePost +
+                              L1_Family +
+                              L1_Edu +
+                              L1_Exposure +
+                              L1_Confidence +
+                              L1_LARpre +
+                              L1_LARpost +
+                              L2_AoA +
+                              L2_PreLAR +
+                              L2_PostLAR +
+                              L2_PreUse +
+                              L2_Fam +
+                              L2_Edu +
+                              L2_Exposure +
+                              L2_Conf +
+                              # time_dummy:L1_UsagePre +
+                              # time_dummy:L1_UsagePost +
+                              # time_dummy:L1_Family +
+                              # time_dummy:L1_Edu +
+                              # time_dummy:L1_Exposure +
+                              # time_dummy:L1_Confidence +
+                              # time_dummy:L1_LARpre +
+                              # time_dummy:L1_LARpost +
+                              # time_dummy:L2_AoA +
+                              # time_dummy:L2_PreLAR +
+                              # time_dummy:L2_PostLAR +
+                              # time_dummy:L2_PreUse +
+                              # time_dummy:L2_Fam +
+                              # time_dummy:L2_Edu +
+                              # time_dummy:L2_Exposure +
+                              # time_dummy:L2_Conf +
+                              (1|patient),
+                           data=forward_indiv)
+
+forward_indiv.lmer_step = lmerTest::step(forward_indiv.lmer, direction="backward", trace=TRUE)
+forward_indiv.lmer_step
+```
+
+```{r}
+forward_indiv.lmer_final <- lmer(composite ~ time_dummy + WAB_AQ_english + L1_UsagePre + L1_Edu + L1_Exposure + L2_PreUse + L2_Edu + L2_Exposure + (1 | patient), data=forward_indiv)
+summary(forward_indiv.lmer_final)
+```

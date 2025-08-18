@@ -1,0 +1,98 @@
+---
+title: "Tanslation Mixed Effects Models - glmmLasso Model Selection"
+author: "Isaac Falconer"
+date: "6/17/2021"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE, include=FALSE}
+# Load required packages
+#library(stats)
+#library(factoextra)
+#library(clusterSim)
+#library(tibble)
+#library(analogue)
+#library(gplots)
+library(lme4)
+library(nlme)
+library(lmerTest)
+library(MuMIn)
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(cAIC4)
+library(MASS)
+library(glmmLasso)
+```
+
+```{r echo=FALSE}
+
+setwd("R:/KiranLab4/Students/Isaac Falconer/ProCoM/BAT-C - LUQ Analysis/Analyses including older data/Mixed Effects Models")
+all_data <- read_excel('all_data_mixed_effects_model_weighted_composite_pre_post.xlsx')
+
+all_data$patient <- as.factor(all_data$patient)
+
+backward_data <- all_data[1:46,]
+forward_data <- all_data[47:92,]
+
+```
+
+
+
+## Backward Translation
+
+```{r}
+
+GLM.backward <- glmmLasso(composite ~ (WAB_AQ_english +
+                    L1 + 
+                    time_dummy +
+                    L1_Background_RC1 +
+                    L1_Use_RC2 + 
+                    L1_Environment_RC3 +
+                    L2_Background_Environment_RC1 +
+                    L2_Use_RC2)^2,
+                  data = backward_data,
+                  rnd = list(patient=~1),
+                  lambda = 25,
+                  switch.NR = TRUE,
+                  final.re = TRUE)
+summary(GLM.backward)
+```
+
+```{r}
+backward <- lmer(composite ~ WAB_AQ_english + L1 + L1_Environment_RC3 + WAB_AQ_english:L1_Environment_RC3 + (1|patient), data=backward_data)
+
+summary(backward)
+```
+
+
+## Forward Translation
+
+```{r}
+
+GLM.backward <- glmmLasso(composite ~ time_dummy + 
+                    WAB_AQ_english +
+                    L1 + 
+                    L1_Background_RC1 +
+                    L1_Use_RC2 + 
+                    L1_Environment_RC3 +
+                    L2_Background_Environment_RC1 +
+                    L2_Use_RC2 +
+                    time_dummy:WAB_AQ_english +
+                    time_dummy:L1 + 
+                    time_dummy:L1_Background_RC1 +
+                    time_dummy:L1_Use_RC2 + 
+                    time_dummy:L1_Environment_RC3 +
+                    time_dummy:L2_Background_Environment_RC1 +
+                    time_dummy:L2_Use_RC2,
+                  data = forward_data,
+                  rnd = list(patient=~1),
+                  lambda = 5,
+                  switch.NR = TRUE,
+                  final.re = TRUE)
+summary(GLM.forward)
+```
