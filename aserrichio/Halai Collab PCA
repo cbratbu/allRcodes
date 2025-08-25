@@ -1,0 +1,234 @@
+---
+title: "WAB PCA"
+author: "Anna Serrichio"
+date: "2025-06-20"
+output: html_document
+---
+
+# LIBRARIES 
+```{r}
+library(readxl) 
+library(psych)
+library(dplyr)
+```
+
+# Reading in data 
+```{r}
+master_data <- read_excel("BU WAB data-single timepoint.xlsx", sheet = "final list") 
+```
+
+
+
+# PCA PARTS 1 & 2: FOUR SUBSCALES (1) AND INDIVIDUAL SUBTESTS (2)
+```{r}
+# Step 1: Load and standardize your data
+df <- subset(master_data, select = c("IC", "FGCP", "YNQ", "AWR", "SeqC", "RS", "ON", "WF", "SenC", "ReSp"))
+# USE EITHER 
+# df <- subset(master_data, select = c("IC", "FGCP", "YNQ", "AWR", "SeqC", "RS", "ON", "WF", "SenC", "ReSp")) to run with individual subtests 
+# OR
+# df <- subset(master_data, select = c("SSS", "AVCS", "RS", "NWFS")) to run with the four main subscales 
+
+df_scaled <- scale(df)  # Standardized Input
+
+# Step 2: Inspect eigenvalues to decide number of components
+fa.parallel(df_scaled, fa = "pc", n.iter = 100)
+
+eigenvalues <- eigen(cor(df_scaled))$values
+print(round(eigenvalues, 3))
+
+# Step 3: Given results of only one significant component, run PCA with 1 component, no rotation
+pca_result <- psych::principal(df_scaled, rotate = "none", nfactors = 1)
+
+# Step 4: View loadings and scores
+print(pca_result, digits = 3)
+
+# To access component scores for each participant:
+head(pca_result$scores)
+
+# To access the component loadings:
+pca_result$loadings
+```
+
+# Adding PCA scores for each participant back into the original dataframe
+```{r}
+pc_scores <- as.data.frame(pca_result$scores) 
+colnames(pc_scores) <- "PC1" 
+df <- cbind(df, pc_scores)
+```
+
+
+
+# Summary tables for PCA 
+```{r}
+# Table: Eigenvalues
+eigen_table <- data.frame(
+  Component = paste0("PC", seq_along(eigenvalues)),
+  Eigenvalue = round(eigenvalues, 3)
+)
+print(eigen_table)
+
+# Table: Factor Loadings
+loading_table <- as.data.frame(unclass(pca_result$loadings))
+loading_table$Variable <- rownames(loading_table)
+loading_table <- loading_table[, c("Variable", "PC1")]  # assuming 1 component = PC1
+colnames(loading_table) <- c("Variable", "Loading")
+print(loading_table)
+
+# Table: Variance Explained – works for 1 component only 
+variance_table <- data.frame(
+  Component            = "PC1",
+  SS_Loading           = round(pca_result$Vaccounted[1], 3), #1 = SS loading 
+  Proportion_Variance  = round(pca_result$Vaccounted[2], 3), #2 = Proportion variance
+  Cumulative_Variance  = round(pca_result$Vaccounted[3], 3) #3 - Cumulative variance 
+)
+
+print(variance_table)
+
+
+#export tables
+write.csv(eigen_table, "eigen_table.csv") 
+write.csv(loading_table, "loading_table.csv")
+write.csv(variance_table, "variance_table.csv")
+```
+
+
+
+# PCA Correlations with WAB AQ 
+```{r}
+# PCA 1 with 4 main tests PCA 
+pc1_scores <- pca_result$scores[, 1] 
+master_data$PC1 <- pc1_scores #Add principle component scores to the master_data dataframe 
+cor.test(master_data$PC1, master_data$WAB_AQ, use = "complete.obs")
+```
+
+---
+title: "Neuropsych Correlations"
+author: "Anna Serrichio"
+date: "2025-06-26"
+output: html_document
+---
+
+# LIBRARIES
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(broom)
+library(ggplot2)
+
+```
+
+# READING IN DATA 
+```{r}
+master_data <- read.csv("additional neuropsych.csv")
+master_data <- master_data[ , colSums(!is.na(master_data)) > 0 ] # remove empty columns
+master_data <- master_data[-c(2:19)] # remove existing WAB columns 
+
+master_data <- master_data %>%
+  mutate(
+    PALPA8_total = rowMeans(
+      pick(palpa_8_1_perc, palpa_8_2_perc, palpa_8_3_perc))) #new column with the mean PALPA 8 score 
+
+
+```
+
+
+# RUN PRELIMINARY CORRELATIONS ON EVERYTHING AND SEE WHAT IS SIGNIFICANT 
+```{r}
+sig_cols <- master_data %>%
+  select(where(is.numeric)) %>%       # keep numeric vars
+  select(-PC1) %>%                    # exclude the target
+  imap_dfr(~tidy(cor.test(master_data$PC1, .x)) %>%    # run test
+             mutate(var = .y)) %>%            # keep column name
+  mutate(p_adj = p.adjust(p.value, method = "fdr")) %>%  # optional
+  filter(p_adj < .05) %>%                       # or p.value < .05
+  pull(var)
+
+print(sig_cols)
+```
+
+# Examining correlations individually 
+```{r}
+# Expressive tasks 
+cor.test(master_data$PC1, master_data$BNT_total)
+cor.test(master_data$PC1, master_data$PALPA8_total)
+cor.test(master_data$PC1, master_data$VNT_total) #not significant
+cor.test(master_data$PC1, master_data$SPPT_total) #not significant
+
+# Receptive tasks 
+cor.test(master_data$PC1, master_data$PAPT_picture) #(outlier-- see below)
+cor.test(master_data$PC1, master_data$PAPT_words)
+cor.test(master_data$PC1, master_data$SCT_total)
+cor.test(master_data$PC1, master_data$VCT_total) #not significant 
+
+# Attention, Memory, and Executive Function Tasks 
+cor.test(master_data$PC1, master_data$rbans_total_index)
+cor.test(master_data$PC1, master_data$CLQT_composite)
+cor.test(master_data$PC1, master_data$forward_total)
+cor.test(master_data$PC1, master_data$backward_total)
+
+
+#Run PAPT picture correlation without outlier
+master_data$PAPT_picture[master_data$PAPT_picture < 12] <- NA
+cor.test(master_data$PC1, master_data$PAPT_picture)
+
+```
+
+
+# Preparing data for plotting
+```{r}
+#Finding percentages for each test 
+master_data <- mutate(master_data, BNT_percent = BNT_total/60)
+master_data <- mutate(master_data, VNT_percent = VNT_total/22)
+master_data <- mutate(master_data, SPPT_percent = SPPT_total/30)
+master_data <- mutate(master_data, PAPT_picture_percent = PAPT_picture/52)
+master_data <- mutate(master_data, PAPT_words_percent = PAPT_words/50)
+master_data <- mutate(master_data, SCT_percent = SCT_total/30)
+master_data <- mutate(master_data, VCT_percent = VCT_total/22)
+
+
+reduced_data <- subset(master_data, select = c("Record_ID", "PC1", "BNT_percent", "PALPA8_total", "VNT_percent", "SPPT_percent", "PAPT_picture_percent", "PAPT_words_percent", "SCT_percent", "VCT_percent", "rbans_total_index", "CLQT_composite", "forward_total", "backward_total"))
+
+reduced_data <- pivot_longer(reduced_data, cols = c("BNT_percent", "PALPA8_total", "VNT_percent", "SPPT_percent", "PAPT_picture_percent", "PAPT_words_percent", "SCT_percent", "VCT_percent", "rbans_total_index", "CLQT_composite", "forward_total", "backward_total"))
+
+reduced_data <- reduced_data %>%
+  mutate(test_type = rep(
+    c("expressive", "expressive", "expressive", "expressive",
+      "receptive", "receptive", "receptive", "receptive",
+      "cognitive", "cognitive", "cognitive", "cognitive"),
+    length.out = nrow(.)
+  ))
+```
+
+
+```{r}
+ggplot(subset(reduced_data, name == "PAPT_picture_percent"),
+       aes(x = value, y = PC1)) +   
+  geom_point(size = 2, alpha = .8) +                  
+  geom_smooth(method = "lm", se = TRUE) +            
+  labs(title = "",
+       x = "Test score",
+       y = "PC1 score",
+       color = "Test type") +               
+  theme_minimal()
+```
+
+
+
+
+# Expressive tasks 
+```{r}
+expressive_data <- subset(reduced_data, test_type == "expressive") 
+
+ggplot(expressive_data,
+       aes(x = value, y = PC1, color = name)) +   
+  geom_point(size = 2, alpha = .8) +                  
+  geom_smooth(method = "lm", se = FALSE) +            
+  labs(title = "PC1 correlations with expressive language tests",
+       x = "Test score",
+       y = "PC1 score",
+       color = "Test type") +               
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
