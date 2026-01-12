@@ -1,0 +1,1750 @@
+# ==============================================================================
+# NAA/PCORI FOCUS GROUP SELECTION - ROLLING WAVE SYSTEM
+# ==============================================================================
+
+library(tidyverse)
+library(readxl)
+library(lubridate)
+
+# ==============================================================================
+# SECTION 1: WAVE CONFIGURATION
+# ==============================================================================
+# -----------------------------------------------------------------------------
+# 1.1 DETERMINE CURRENT WAVE
+# -----------------------------------------------------------------------------
+
+# Check for previous wave data
+PREVIOUS_WAVES_FILE <- "output/previous_waves_data.rds"
+FROZEN_PARTICIPANTS_FILE <- "output/frozen_participants.csv"
+
+if (file.exists(PREVIOUS_WAVES_FILE)) {
+  previous_data <- readRDS(PREVIOUS_WAVES_FILE)
+  CURRENT_WAVE <- previous_data$last_wave + 1
+  cat(sprintf("Previous waves detected. Starting WAVE %d\n\n", CURRENT_WAVE))
+} else {
+  CURRENT_WAVE <- 1
+  previous_data <- list(
+    last_wave = 0,
+    total_selected = 0,
+    all_selected = data.frame(),
+    frozen_ids = c()
+  )
+  cat("No previous waves detected. Starting WAVE 1\n\n")
+}
+
+# -----------------------------------------------------------------------------
+# 1.2 WAVE SPECIFICATIONS
+# -----------------------------------------------------------------------------
+
+# Define all waves and their requirements
+WAVE_SPECS <- list(
+  wave1 = list(
+    groups = 1:4,
+    group_sizes = c(7, 7, 7, 7),
+    total = 28,
+    min_eligible_needed = 35,
+    max_eligible_needed = 40
+  ),
+  wave2 = list(
+    groups = 5:8,
+    group_sizes = c(7, 7, 6, 7),
+    total = 27,
+    min_eligible_needed = 33,
+    max_eligible_needed = 35
+  ),
+  wave3 = list(
+    groups = 9:12,
+    group_sizes = c(6, 6, 6, 6),
+    total = 24,
+    min_eligible_needed = 30,
+    max_eligible_needed = 32
+  ),
+  wave4 = list(
+    groups = 13:15,
+    group_sizes = c(7, 7, 7),
+    total = 21,
+    min_eligible_needed = 25,
+    max_eligible_needed = 28
+  )
+)
+
+# Get current wave specs
+CURRENT_WAVE_SPEC <- WAVE_SPECS[[paste0("wave", CURRENT_WAVE)]]
+
+if (is.null(CURRENT_WAVE_SPEC)) {
+  stop(sprintf("Wave %d is not defined. Maximum 4 waves configured.", CURRENT_WAVE))
+}
+
+# ==============================================================================
+# SECTION 2: FIELD MAPPINGS FOR PCORI DATA
+# ==============================================================================
+
+FIELD_NAMES <- list(
+  # Core identifiers
+  id = "record_id",
+  first_name = "first_name",
+  last_name = "last_name",
+  email = "email",
+  phone = "phone",
+  
+  # Demographics
+  age = "age",
+  sex = "gender",  # NOT gender1 - codebook shows "gender"
+  race = "race",    # 1=White, 2=Black, 3=Asian, 4=Native American, 5=Pacific Islander, 6=Multiracial
+  ethnicity = "ethnicity",  # 0=Not Hispanic, 1=Hispanic
+  state = "state",
+  zip = "zip_code",
+  city = "city",
+  education = "education_years",
+  occupation = "occupation",
+  date_of_birth = "date_of_birth",  # Added from codebook
+  
+  # Stakeholder information
+  stakeholder_group = "stakeholder_group",  # 1=PWA, 2=Family/Caregiver, 3=Clinician, 4=Researcher
+  stakeholder_merged = "stakeholder_merged",  # Calculated field: 1=PWA/Family, 2=Clinician/Researcher
+  stakeholder_relationship = "stakeholder_relationship",  # For caregivers
+  
+  # Aphasia severity
+  severity_pwa = "history_severity",     # For PWA: 1=Mild, 2=Moderate, 3=Severe
+  severity_family = "history_severity_2", # For family members
+  
+  # Dates
+  onset_pwa = "date_onset",          # MM/YYYY format - CORRECTED from date_onset_pwa
+  onset_family = "date_onset_family", # MM/YYYY format
+  
+  # Urban/rural indicators
+  adi = "adi_national",
+  ruca = "ruca",
+  
+  # Additional fields
+  language = "language",
+  recruitment_source = "recruitment_source",
+  advisory_board = "advisory_board",
+  
+  # ============================================================================
+  # PWA-FAMILY LINKING FIELDS (from REDCap)
+  # ============================================================================
+  
+  # Family member field: "Did your family member/friend with aphasia fill out this survey too?"
+  # Only shown if stakeholder_group = 2 (Family/Caregiver)
+  # Values: 1=Yes, 0=No, 2=I don't know
+  family_member_both = "family_member_both",
+  
+  
+  # Family member field: "Please provide their name" (the PWA's name)
+  # Only shown if family_member_both = 1 or 2
+  # Contains PWA's name OR "Don't Group" if they don't want to be paired
+  family_friend_pwa_name = "family_friend_pwa_name_group"
+)
+
+# Medical exclusion fields
+MED_HX_PREFIX <- "med_hx___"
+MED_EXCLUSIONS <- c("alzheimers", "ppa", "tbi", "parkinsons")
+
+# ==============================================================================
+# SECTION 2.5: PWA-FAMILY PAIR CONFIGURATION
+# ==============================================================================
+
+# Configuration for pair handling
+PAIR_CONFIG <- list(
+  # Enable/disable pair linking feature
+  enable_pair_linking = TRUE,
+  
+  # How to handle pairs when sampling:
+  # "always" = always keep pairs together in same focus group
+  # "same_wave" = pairs must be in same wave but can be different groups
+  # "priority" = prioritize pairs but allow splitting if needed for diversity
+  pair_mode = "always",
+  
+  # Weight boost for valid pairs (encourages selection of pairs)
+  pair_weight_boost = 1.5,
+  
+  # Maximum pairs per focus group (to maintain diversity)
+  max_pairs_per_group = 2
+)
+
+# ==============================================================================
+# SECTION 3: CONFIGURATION PARAMETERS
+# ==============================================================================
+
+# Overall targets for 100 participants
+OVERALL_TARGETS <- list(
+  min_age_60_plus = 80,       # At least 80 people aged 60+
+  min_age_60_plus_pct = 0.80, # 80% aged 60+
+  min_minorities = 55,         # At least 55 minorities
+  min_minorities_pct = 0.55,   # 55% minorities
+  male_target = 50,            # Target 50 males
+  female_target = 50,          # Target 50 females
+  min_urban = 80,              # At least 80 urban
+  min_urban_pct = 0.80,        # 80% urban
+  min_southeast = 30,          # At least 30 from Southeast
+  min_southeast_pct = 0.30,    # 30% Southeast
+  max_northeast = 15,          # At most 15 from Northeast
+  max_northeast_pct = 0.15,    # 15% Northeast
+  min_lower_ses = 40,          # At least 40 lower SES
+  min_lower_ses_pct = 0.40,    # 40% lower SES
+  
+  # PWA/Caregiver balance (flexible)
+  target_pwa_pct = 0.80,       # Aim for ~80% PWA
+  target_caregiver_pct = 0.20  # Aim for ~20% caregivers
+)
+
+# Weight parameters (adjustable)
+AGE_WEIGHTS <- list(
+  age_75_plus = 8.0,
+  age_70_74 = 6.0,
+  age_65_69 = 4.0,
+  age_60_64 = 3.0,
+  age_55_59 = 0.5,
+  age_under_55 = 0.05
+)
+
+RACE_WEIGHTS <- list(
+  black = 4.0,
+  asian = 4.0,
+  hispanic = 4.0,
+  native_american = 3.5,
+  pacific_islander = 3.5,
+  multiracial = 3.0,
+  white_non_hispanic = 0.25
+)
+
+URBAN_WEIGHTS <- list(
+  urban = 2.5,
+  rural = 0.4,
+  unknown = 1.0
+)
+
+REGION_WEIGHTS <- list(
+  southeast = 4.0,
+  midwest = 1.0,
+  west = 1.0,
+  northeast = 0.2,
+  other = 0.8
+)
+
+SES_WEIGHTS <- list(
+  lower = 2.0,
+  middle = 1.0,
+  upper = 0.5
+)
+
+# Stakeholder weights (slight preference for PWA)
+STAKEHOLDER_WEIGHTS <- list(
+  pwa = 1.2,
+  caregiver = 0.8
+)
+
+# ==============================================================================
+# SECTION 4: LOAD AND PREPARE DATA
+# ==============================================================================
+
+cat(strrep("═", 80), "\n")
+cat(sprintf("   WAVE %d SELECTION PROCESS\n", CURRENT_WAVE))
+cat(strrep("═", 80), "\n\n")
+
+cat("LOADING DATA\n")
+cat(strrep("-", 40), "\n")
+
+# Load the data
+raw_data <- read.csv("data/PWA+Family.csv", stringsAsFactors = FALSE)
+cat(sprintf("Total records in database: %d\n", nrow(raw_data)))
+
+# Load frozen participants if they exist
+if (file.exists(FROZEN_PARTICIPANTS_FILE)) {
+  frozen_data <- read.csv(FROZEN_PARTICIPANTS_FILE, stringsAsFactors = FALSE)
+  frozen_ids <- frozen_data$record_id
+  cat(sprintf("Previously selected (frozen): %d\n", length(frozen_ids)))
+} else {
+  frozen_ids <- c()
+}
+
+# Remove already selected participants
+available_data <- raw_data %>%
+  filter(!(.data[[FIELD_NAMES$id]] %in% frozen_ids))
+cat(sprintf("Available for selection: %d\n\n", nrow(available_data)))
+
+# ==============================================================================
+# SECTION 4.5: LOAD OCCUPATIONAL PRESTIGE SCORES
+# ==============================================================================
+
+cat("LOADING OCCUPATIONAL PRESTIGE SCORES\n")
+cat(strrep("-", 40), "\n")
+
+# Load prestige scores data
+PRESTIGE_FILE <- "data/Occupational Prestige Scores and Crosswalk to Census.csv"
+if (file.exists(PRESTIGE_FILE)) {
+  prestige_data <- read.csv(PRESTIGE_FILE, stringsAsFactors = FALSE)
+  
+  # Clean and prepare prestige lookup table
+  # Use OPR-Jobs-2016 as the main prestige score (ranges from ~19 to ~90)
+  prestige_lookup <- prestige_data %>%
+    select(
+      job_title = `OPR.Job.Title`,
+      prestige_score = `OPR.Jobs.2016`,
+      field_title = `OPR.Field.Title`,
+      field_score = `OPR.Field.2016`
+    ) %>%
+    filter(!is.na(prestige_score)) %>%
+    distinct(job_title, .keep_all = TRUE) %>%
+    mutate(
+      job_title_clean = tolower(trimws(job_title)),
+      # Create simplified keywords for matching
+      job_keywords = gsub("[^a-z ]", "", job_title_clean)
+    )
+  
+  # Also create a field-level lookup (broader categories)
+  field_lookup <- prestige_data %>%
+    select(
+      field_title = `OPR.Field.Title`,
+      field_score = `OPR.Field.2016`
+    ) %>%
+    filter(!is.na(field_score)) %>%
+    distinct(field_title, .keep_all = TRUE) %>%
+    mutate(field_title_clean = tolower(trimws(field_title)))
+  
+  cat(sprintf("  Loaded %d unique job titles\n", nrow(prestige_lookup)))
+  cat(sprintf("  Loaded %d occupational fields\n", nrow(field_lookup)))
+  cat(sprintf("  Prestige score range: %.1f - %.1f\n", 
+              min(prestige_lookup$prestige_score), 
+              max(prestige_lookup$prestige_score)))
+  
+  PRESTIGE_AVAILABLE <- TRUE
+} else {
+  cat("  ⚠ Prestige scores file not found. Using education-only SES.\n")
+  cat(sprintf("  Expected path: %s\n", PRESTIGE_FILE))
+  PRESTIGE_AVAILABLE <- FALSE
+}
+
+# -----------------------------------------------------------------------------
+# Function to match occupation text to prestige score
+# -----------------------------------------------------------------------------
+
+match_occupation_prestige <- function(occupation_text, prestige_lookup, field_lookup) {
+  if (is.na(occupation_text) || occupation_text == "" || !PRESTIGE_AVAILABLE) {
+    return(list(score = NA, match_type = "none", matched_title = NA))
+  }
+  
+  # Clean the input
+  occ_clean <- tolower(trimws(as.character(occupation_text)))
+  occ_keywords <- gsub("[^a-z ]", "", occ_clean)
+  occ_words <- unlist(strsplit(occ_keywords, "\\s+"))
+  
+  # Strategy 1: Exact match
+  exact_match <- prestige_lookup %>%
+    filter(job_title_clean == occ_clean)
+  
+  if (nrow(exact_match) > 0) {
+    return(list(
+      score = exact_match$prestige_score[1],
+      match_type = "exact",
+      matched_title = exact_match$job_title[1]
+    ))
+  }
+  
+  # Strategy 2: Partial/contains match
+  partial_match <- prestige_lookup %>%
+    filter(
+      grepl(occ_clean, job_title_clean, fixed = TRUE) |
+      grepl(job_title_clean, occ_clean, fixed = TRUE)
+    )
+  
+  if (nrow(partial_match) > 0) {
+    # Return the best match (shortest title that contains the occupation)
+    best <- partial_match %>%
+      mutate(title_len = nchar(job_title_clean)) %>%
+      arrange(title_len) %>%
+      slice(1)
+    return(list(
+      score = best$prestige_score,
+      match_type = "partial",
+      matched_title = best$job_title
+    ))
+  }
+  
+  # Strategy 3: Keyword matching (at least 2 words match)
+  if (length(occ_words) >= 1) {
+    keyword_scores <- sapply(1:nrow(prestige_lookup), function(i) {
+      job_words <- unlist(strsplit(prestige_lookup$job_keywords[i], "\\s+"))
+      # Count matching words (excluding very short words)
+      occ_words_filtered <- occ_words[nchar(occ_words) >= 3]
+      job_words_filtered <- job_words[nchar(job_words) >= 3]
+      sum(occ_words_filtered %in% job_words_filtered)
+    })
+    
+    best_match_idx <- which.max(keyword_scores)
+    if (keyword_scores[best_match_idx] >= 1) {
+      return(list(
+        score = prestige_lookup$prestige_score[best_match_idx],
+        match_type = "keyword",
+        matched_title = prestige_lookup$job_title[best_match_idx]
+      ))
+    }
+  }
+  
+  # Strategy 4: Field-level match (broadest category)
+  for (i in 1:nrow(field_lookup)) {
+    field_words <- unlist(strsplit(tolower(field_lookup$field_title_clean[i]), "\\s+"))
+    field_words <- field_words[nchar(field_words) >= 4]
+    if (any(sapply(field_words, function(fw) grepl(fw, occ_clean)))) {
+      return(list(
+        score = field_lookup$field_score[i],
+        match_type = "field",
+        matched_title = field_lookup$field_title[i]
+      ))
+    }
+  }
+  
+  # No match found
+  return(list(score = NA, match_type = "none", matched_title = NA))
+}
+
+cat("\n")
+
+# ==============================================================================
+# SECTION 5: APPLY ELIGIBILITY CRITERIA
+# ==============================================================================
+
+cat("APPLYING ELIGIBILITY CRITERIA\n")
+cat(strrep("-", 40), "\n")
+
+# -----------------------------------------------------------------------------
+# 5.0 DATA VALIDATION - Exclude incorrectly filled forms
+# -----------------------------------------------------------------------------
+
+cat("\nValidating form data...\n")
+
+# Initialize validation tracking
+validation_flags <- data.frame(
+  record_id = available_data[[FIELD_NAMES$id]],
+  invalid_education = FALSE,
+  invalid_age = FALSE,
+  invalid_form = FALSE
+)
+
+# Check for invalid education years (e.g., 2024, values > 30, negative values)
+education_values <- as.numeric(available_data[[FIELD_NAMES$education]])
+validation_flags$invalid_education <- !is.na(education_values) & (
+  education_values > 30 |           # More than 30 years is implausible
+  education_values < 0 |            # Negative years impossible
+  education_values > 1900 |         # Looks like a year (e.g., 2024, 1995)
+  (education_values >= 100 & education_values <= 200)  # Possible typo (e.g., 120 instead of 12)
+)
+
+# Check for invalid age values
+age_values <- as.numeric(available_data[[FIELD_NAMES$age]])
+validation_flags$invalid_age <- !is.na(age_values) & (
+  age_values < 18 |                 # Under 18 not eligible
+  age_values > 120 |                # Implausibly old
+  age_values > 1900                 # Looks like birth year entered instead of age
+)
+
+# Combine validation flags
+validation_flags$invalid_form <- validation_flags$invalid_education | validation_flags$invalid_age
+
+# Report validation issues
+n_invalid_education <- sum(validation_flags$invalid_education)
+n_invalid_age <- sum(validation_flags$invalid_age)
+n_invalid_total <- sum(validation_flags$invalid_form)
+
+if (n_invalid_education > 0) {
+  cat(sprintf("  ⚠ Invalid education values found: %d\n", n_invalid_education))
+  # Show examples of invalid values
+  invalid_edu_examples <- available_data[validation_flags$invalid_education, ]
+  if (nrow(invalid_edu_examples) > 0) {
+    cat("    Examples: ")
+    example_vals <- head(education_values[validation_flags$invalid_education], 5)
+    cat(paste(example_vals, collapse = ", "), "\n")
+  }
+}
+
+if (n_invalid_age > 0) {
+  cat(sprintf("  ⚠ Invalid age values found: %d\n", n_invalid_age))
+}
+
+cat(sprintf("  Total records excluded for invalid form data: %d\n", n_invalid_total))
+
+# Filter out invalid records
+has_invalid_form <- validation_flags$invalid_form
+
+# -----------------------------------------------------------------------------
+# 5.1 Medical Exclusions
+# -----------------------------------------------------------------------------
+
+# Check for medical exclusions
+exclusion_columns <- paste0(MED_HX_PREFIX, MED_EXCLUSIONS)
+existing_exclusion_cols <- exclusion_columns[exclusion_columns %in% names(available_data)]
+
+if (length(existing_exclusion_cols) > 0) {
+  has_medical_exclusion <- rowSums(available_data[existing_exclusion_cols], na.rm = TRUE) > 0
+} else {
+  has_medical_exclusion <- rep(FALSE, nrow(available_data))
+}
+
+# Calculate years post-stroke/onset
+calculate_years_post_onset <- function(onset_dates) {
+  sapply(onset_dates, function(x) {
+    if (is.na(x) || x == "") return(NA)
+    
+    # Handle MM/YYYY format
+    parts <- strsplit(as.character(x), "/")[[1]]
+    if (length(parts) != 2) return(NA)
+    
+    tryCatch({
+      # Create date (15th of the month as approximation)
+      onset_date <- ymd(paste0(parts[2], "-", parts[1], "-15"))
+      years_since <- as.numeric(difftime(Sys.Date(), onset_date, units = "days")) / 365.25
+      return(years_since)
+    }, error = function(e) {
+      return(NA)
+    })
+  })
+}
+
+# Get stakeholder type
+stakeholder_type <- available_data[[FIELD_NAMES$stakeholder_group]]
+
+# Calculate years post onset based on stakeholder type
+years_post_onset <- ifelse(
+  stakeholder_type == 1,  # PWA
+  calculate_years_post_onset(available_data[[FIELD_NAMES$onset_pwa]]),
+  calculate_years_post_onset(available_data[[FIELD_NAMES$onset_family]])
+)
+
+# Apply eligibility criteria (now includes form validation)
+eligible <- (!has_medical_exclusion) & 
+  (!has_invalid_form) &
+  (is.na(years_post_onset) | years_post_onset >= 1) &
+  (!is.na(available_data[[FIELD_NAMES$age]]))
+
+# Summary
+cat(sprintf("\nEligibility Summary:\n"))
+cat(sprintf("  Medical exclusions: %d\n", sum(has_medical_exclusion)))
+cat(sprintf("  Invalid form data: %d\n", sum(has_invalid_form)))
+cat(sprintf("  Less than 1 year post-onset: %d\n", 
+            sum(!is.na(years_post_onset) & years_post_onset < 1)))
+cat(sprintf("  Missing critical data: %d\n", sum(is.na(available_data[[FIELD_NAMES$age]]))))
+cat(sprintf("  ELIGIBLE: %d\n\n", sum(eligible)))
+
+# Check if we have enough eligible
+if (sum(eligible) < CURRENT_WAVE_SPEC$min_eligible_needed) {
+  cat(sprintf("\n⚠ ERROR: Only %d eligible participants available.\n", sum(eligible)))
+  cat(sprintf("Need at least %d for Wave %d.\n", 
+              CURRENT_WAVE_SPEC$min_eligible_needed, CURRENT_WAVE))
+  stop("Cannot proceed with this wave. Recruit more participants first.")
+}
+
+# Filter to eligible
+eligible_data <- available_data[eligible, ]
+
+# ==============================================================================
+# SECTION 5.5: IDENTIFY VALID PWA-FAMILY PAIRS (NAME-BASED MATCHING)
+# ==============================================================================
+
+cat("IDENTIFYING PWA-FAMILY PAIRS\n")
+cat(strrep("-", 40), "\n")
+
+# Check if pair linking fields exist in the data
+pair_fields_exist <- all(c(
+  FIELD_NAMES$family_member_both,
+  FIELD_NAMES$family_friend_pwa_name
+) %in% names(eligible_data))
+
+if (PAIR_CONFIG$enable_pair_linking && pair_fields_exist) {
+  
+  # Create standardized name matching function
+  standardize_name <- function(name) {
+    if (is.na(name) || name == "") return(NA)
+    # Convert to lowercase, remove extra spaces, trim
+    name <- tolower(trimws(as.character(name)))
+    # Remove common punctuation
+    name <- gsub("[.,']", "", name)
+    # Collapse multiple spaces
+    name <- gsub("\\s+", " ", name)
+    return(name)
+  }
+  
+  # Get all PWA records with their standardized full names
+  pwa_records <- eligible_data %>%
+    filter(.data[[FIELD_NAMES$stakeholder_group]] == 1) %>%  # PWA only
+    mutate(
+      pwa_full_name = paste(.data[[FIELD_NAMES$first_name]], .data[[FIELD_NAMES$last_name]]),
+      pwa_full_name_std = sapply(pwa_full_name, standardize_name),
+      # Also create reverse name format for matching "Last First"
+      pwa_full_name_reverse = paste(.data[[FIELD_NAMES$last_name]], .data[[FIELD_NAMES$first_name]]),
+      pwa_full_name_reverse_std = sapply(pwa_full_name_reverse, standardize_name),
+      # First name only (for partial matches)
+      pwa_first_name_std = sapply(.data[[FIELD_NAMES$first_name]], standardize_name)
+    ) %>%
+    select(.data[[FIELD_NAMES$id]], pwa_full_name, pwa_full_name_std, 
+           pwa_full_name_reverse_std, pwa_first_name_std,
+           .data[[FIELD_NAMES$first_name]], .data[[FIELD_NAMES$last_name]])
+  
+  names(pwa_records)[1] <- "pwa_record_id"
+  names(pwa_records)[6] <- "pwa_first_name"
+  names(pwa_records)[7] <- "pwa_last_name"
+  
+  cat(sprintf("PWA records available for matching: %d\n", nrow(pwa_records)))
+  
+  # Get family members who indicated their PWA also filled out survey
+  family_with_pwa <- eligible_data %>%
+    filter(
+      .data[[FIELD_NAMES$stakeholder_group]] == 2,  # Family/Caregiver
+      .data[[FIELD_NAMES$family_member_both]] == 1   # Yes, PWA filled out survey
+    ) %>%
+    mutate(
+      provided_pwa_name = .data[[FIELD_NAMES$family_friend_pwa_name]],
+      provided_pwa_name_std = sapply(provided_pwa_name, standardize_name),
+      # Check if they said "Don't Group"
+      wants_grouping = !grepl("don'?t\\s*group", provided_pwa_name, ignore.case = TRUE) &
+        !is.na(provided_pwa_name) & 
+        provided_pwa_name != ""
+    ) %>%
+    filter(wants_grouping)  # Only keep those who want to be grouped
+  
+  cat(sprintf("Family members wanting to pair: %d\n", nrow(family_with_pwa)))
+  
+  # Initialize pair tracking columns
+  eligible_data <- eligible_data %>%
+    mutate(
+      is_in_valid_pair = FALSE,
+      pair_id = NA_character_,
+      paired_with_id = NA_character_,
+      paired_with_name = NA_character_
+    )
+  
+  # Match family members to PWA by name
+  valid_pairs <- list()
+  pair_counter <- 0
+  matched_pwa_ids <- c()
+  matched_family_ids <- c()
+  
+  if (nrow(family_with_pwa) > 0 && nrow(pwa_records) > 0) {
+    
+    for (i in 1:nrow(family_with_pwa)) {
+      family_id <- family_with_pwa[[FIELD_NAMES$id]][i]
+      provided_name <- family_with_pwa$provided_pwa_name_std[i]
+      
+      if (is.na(provided_name)) next
+      
+      # Try to find matching PWA
+      # Strategy 1: Exact match on "First Last"
+      match_idx <- which(pwa_records$pwa_full_name_std == provided_name)
+      
+      # Strategy 2: Try "Last First" format
+      if (length(match_idx) == 0) {
+        match_idx <- which(pwa_records$pwa_full_name_reverse_std == provided_name)
+      }
+      
+      # Strategy 3: Partial match (provided name contains PWA's full name or vice versa)
+      if (length(match_idx) == 0) {
+        match_idx <- which(
+          sapply(pwa_records$pwa_full_name_std, function(pwa_name) {
+            grepl(pwa_name, provided_name, fixed = TRUE) | 
+              grepl(provided_name, pwa_name, fixed = TRUE)
+          })
+        )
+      }
+      
+      # If we found exactly one match and that PWA hasn't been matched yet
+      if (length(match_idx) == 1) {
+        pwa_id <- pwa_records$pwa_record_id[match_idx]
+        
+        # Check PWA hasn't already been matched
+        if (!(pwa_id %in% matched_pwa_ids)) {
+          pair_counter <- pair_counter + 1
+          pair_id <- sprintf("PAIR_%03d", pair_counter)
+          
+          # Record the pair
+          valid_pairs[[pair_id]] <- list(
+            pwa_id = pwa_id,
+            family_id = family_id,
+            pwa_name = pwa_records$pwa_full_name[match_idx],
+            family_name = paste(
+              family_with_pwa[[FIELD_NAMES$first_name]][i],
+              family_with_pwa[[FIELD_NAMES$last_name]][i]
+            )
+          )
+          
+          # Mark both as matched
+          matched_pwa_ids <- c(matched_pwa_ids, pwa_id)
+          matched_family_ids <- c(matched_family_ids, family_id)
+          
+          # Update eligible_data
+          pwa_row <- which(eligible_data[[FIELD_NAMES$id]] == pwa_id)
+          family_row <- which(eligible_data[[FIELD_NAMES$id]] == family_id)
+          
+          if (length(pwa_row) == 1 && length(family_row) == 1) {
+            eligible_data$is_in_valid_pair[pwa_row] <- TRUE
+            eligible_data$is_in_valid_pair[family_row] <- TRUE
+            eligible_data$pair_id[pwa_row] <- pair_id
+            eligible_data$pair_id[family_row] <- pair_id
+            eligible_data$paired_with_id[pwa_row] <- family_id
+            eligible_data$paired_with_id[family_row] <- pwa_id
+            eligible_data$paired_with_name[pwa_row] <- valid_pairs[[pair_id]]$family_name
+            eligible_data$paired_with_name[family_row] <- valid_pairs[[pair_id]]$pwa_name
+          }
+        }
+      } else if (length(match_idx) > 1) {
+        # Multiple matches - log for manual review
+        cat(sprintf("  ⚠ Multiple PWA matches for '%s' (Family ID: %s) - skipping\n",
+                    family_with_pwa$provided_pwa_name[i], family_id))
+      }
+    }
+  }
+  
+  n_valid_pairs <- length(valid_pairs)
+  n_paired_individuals <- sum(eligible_data$is_in_valid_pair)
+  n_unpaired <- sum(!eligible_data$is_in_valid_pair)
+  
+  cat(sprintf("\nValid PWA-Family pairs found: %d\n", n_valid_pairs))
+  cat(sprintf("Individuals in pairs: %d\n", n_paired_individuals))
+  cat(sprintf("Unpaired individuals: %d\n", n_unpaired))
+  
+  # Show pair details
+  if (n_valid_pairs > 0) {
+    cat("\nPair Details:\n")
+    for (pair_id in names(valid_pairs)) {
+      pair <- valid_pairs[[pair_id]]
+      cat(sprintf("  %s: %s (PWA) + %s (Family)\n", 
+                  pair_id, pair$pwa_name, pair$family_name))
+    }
+  }
+  
+  # Report unmatched family members
+  unmatched_family <- family_with_pwa %>%
+    filter(!(.data[[FIELD_NAMES$id]] %in% matched_family_ids))
+  
+  if (nrow(unmatched_family) > 0) {
+    cat(sprintf("\n⚠ Unmatched family members: %d\n", nrow(unmatched_family)))
+    cat("  (PWA name provided but no matching PWA record found)\n")
+    for (j in 1:min(5, nrow(unmatched_family))) {
+      cat(sprintf("    - %s %s provided name: '%s'\n",
+                  unmatched_family[[FIELD_NAMES$first_name]][j],
+                  unmatched_family[[FIELD_NAMES$last_name]][j],
+                  unmatched_family$provided_pwa_name[j]))
+    }
+    if (nrow(unmatched_family) > 5) {
+      cat(sprintf("    ... and %d more\n", nrow(unmatched_family) - 5))
+    }
+  }
+  
+} else {
+  # Pair linking disabled or fields don't exist
+  if (!PAIR_CONFIG$enable_pair_linking) {
+    cat("Pair linking is DISABLED in configuration.\n")
+  } else {
+    cat("WARNING: Pair linking fields not found in data.\n")
+    cat(sprintf("  Looking for: %s, %s\n",
+                FIELD_NAMES$family_member_both,
+                FIELD_NAMES$family_friend_pwa_name))
+    cat("  Available columns: ", paste(head(names(eligible_data), 20), collapse = ", "), "...\n")
+  }
+  
+  # Set default values (no pairing)
+  eligible_data <- eligible_data %>%
+    mutate(
+      is_in_valid_pair = FALSE,
+      pair_id = NA_character_,
+      paired_with_id = NA_character_,
+      paired_with_name = NA_character_
+    )
+  
+  valid_pairs <- list()
+  n_valid_pairs <- 0
+}
+
+cat("\n")
+
+# ==============================================================================
+# SECTION 6: CALCULATE DEMOGRAPHICS AND WEIGHTS
+# ==============================================================================
+
+cat("CALCULATING DEMOGRAPHICS & WEIGHTS\n")
+cat(strrep("-", 40), "\n")
+
+# State code mapping (REDCap numeric codes to abbreviations)
+STATE_CODES <- c(
+  "1" = "AL", "2" = "AK", "3" = "AZ", "4" = "AR", "5" = "CA",
+  "6" = "CO", "7" = "CT", "8" = "DC", "9" = "DE", "10" = "FL",
+  "11" = "GA", "12" = "HI", "13" = "ID", "14" = "IL", "15" = "IN",
+  "16" = "IA", "17" = "KS", "18" = "KY", "19" = "LA", "20" = "ME",
+  "21" = "MD", "22" = "MA", "23" = "MI", "24" = "MN", "25" = "MS",
+  "26" = "MO", "27" = "MT", "28" = "NE", "29" = "NV", "30" = "NH",
+  "31" = "NJ", "32" = "NM", "33" = "NY", "34" = "NC", "35" = "ND",
+  "36" = "OH", "37" = "OK", "38" = "OR", "39" = "PA", "40" = "RI",
+  "41" = "SC", "42" = "SD", "43" = "TN", "44" = "TX", "45" = "UT",
+  "46" = "VT", "47" = "VA", "48" = "WA", "49" = "WV", "50" = "WI",
+  "51" = "WY"
+)
+
+# Define regions
+southeast_states <- c("FL", "GA", "NC", "SC", "VA", "AL", "MS", "TN", "AR", "LA", "KY", "WV")
+northeast_states <- c("CT", "ME", "MA", "NH", "RI", "VT", "NJ", "NY", "PA", "DE", "MD", "DC")
+midwest_states <- c("IL", "IN", "MI", "OH", "WI", "IA", "KS", "MN", "MO", "NE", "ND", "SD")
+west_states <- c("AZ", "CO", "ID", "MT", "NV", "NM", "UT", "WY", "AK", "CA", "HI", "OR", "WA", "TX", "OK")
+
+# Process demographics
+demo_data <- eligible_data %>%
+  mutate(
+    # Basic identifiers
+    record_id = .data[[FIELD_NAMES$id]],
+    first_name = .data[[FIELD_NAMES$first_name]],
+    last_name = .data[[FIELD_NAMES$last_name]],
+    email = .data[[FIELD_NAMES$email]],
+    phone = .data[[FIELD_NAMES$phone]],
+    city = .data[[FIELD_NAMES$city]],
+    
+    # Age
+    age = .data[[FIELD_NAMES$age]],
+    is_60_plus = age >= 60,
+    
+    # Stakeholder type
+    stakeholder_group = .data[[FIELD_NAMES$stakeholder_group]],
+    stakeholder_type = case_when(
+      stakeholder_group == 1 ~ "PWA",
+      stakeholder_group == 2 ~ "Family/Caregiver",
+      stakeholder_group == 3 ~ "Clinician",
+      stakeholder_group == 4 ~ "Researcher",
+      TRUE ~ "Unknown"
+    ),
+    # Group PWA and Family together for focus groups
+    stakeholder_category = ifelse(stakeholder_group <= 2, "PWA/Family", "Professional"),
+    
+    # Aphasia severity (use appropriate field based on stakeholder type)
+    aphasia_severity_raw = ifelse(
+      stakeholder_group == 1,
+      .data[[FIELD_NAMES$severity_pwa]],
+      .data[[FIELD_NAMES$severity_family]]
+    ),
+    aphasia_severity = case_when(
+      aphasia_severity_raw == 1 ~ "Mild",
+      aphasia_severity_raw == 2 ~ "Moderate",
+      aphasia_severity_raw == 3 ~ "Severe",
+      TRUE ~ "Unknown"
+    ),
+    
+    # Geography - recode state from numeric to abbreviation
+    state_raw = as.character(.data[[FIELD_NAMES$state]]),
+    state = STATE_CODES[state_raw],
+    state = ifelse(is.na(state), state_raw, state),  # Keep original if not in mapping
+    region = case_when(
+      state %in% southeast_states ~ "southeast",
+      state %in% northeast_states ~ "northeast",
+      state %in% midwest_states ~ "midwest",
+      state %in% west_states ~ "west",
+      TRUE ~ "other"
+    ),
+    
+    # Race/ethnicity
+    race_raw = .data[[FIELD_NAMES$race]],
+    race_category = case_when(
+      race_raw %in% c("1", 1) ~ "White",
+      race_raw %in% c("2", 2) ~ "Black",
+      race_raw %in% c("3", 3) ~ "Asian",
+      race_raw %in% c("4", 4) ~ "Native American",
+      race_raw %in% c("5", 5) ~ "Pacific Islander",
+      race_raw %in% c("6", 6) ~ "Multiracial",
+      TRUE ~ "Other"
+    ),
+    
+    ethnicity_raw = .data[[FIELD_NAMES$ethnicity]],
+    is_hispanic = ethnicity_raw %in% c(1, "1"),  # 1=Hispanic, 0=Non-Hispanic
+    is_non_white = (race_category != "White") | is_hispanic,
+    
+    # Sex/Gender
+    sex_raw = .data[[FIELD_NAMES$sex]],
+    sex_clean = case_when(
+      sex_raw %in% c("1", 1) ~ "Male",
+      sex_raw %in% c("2", 2) ~ "Female",
+      sex_raw %in% c("3", 3) ~ "Other",
+      TRUE ~ "Unknown"
+    ),
+    
+    # SES - Education component
+    education_years = .data[[FIELD_NAMES$education]],
+    occupation_raw = .data[[FIELD_NAMES$occupation]],
+    
+    # Urban/rural (using RUCA if available, otherwise unknown)
+    ruca_code = as.numeric(.data[[FIELD_NAMES$ruca]]),
+    urban_rural = case_when(
+      !is.na(ruca_code) & ruca_code <= 3 ~ "urban",
+      !is.na(ruca_code) & ruca_code > 3 ~ "rural",
+      TRUE ~ "unknown"
+    )
+  )
+
+# -----------------------------------------------------------------------------
+# Calculate Occupational Prestige Scores for each participant
+# -----------------------------------------------------------------------------
+
+cat("\nMatching occupations to prestige scores...\n")
+
+if (PRESTIGE_AVAILABLE && FIELD_NAMES$occupation %in% names(eligible_data)) {
+  # Match each occupation to a prestige score
+  prestige_results <- lapply(demo_data$occupation_raw, function(occ) {
+    match_occupation_prestige(occ, prestige_lookup, field_lookup)
+  })
+  
+  # Extract results
+  demo_data$occupation_prestige <- sapply(prestige_results, function(x) x$score)
+  demo_data$prestige_match_type <- sapply(prestige_results, function(x) x$match_type)
+  demo_data$prestige_matched_title <- sapply(prestige_results, function(x) x$matched_title)
+  
+  # Report matching statistics
+  match_summary <- table(demo_data$prestige_match_type)
+  cat("  Prestige score matching results:\n")
+  for (mt in names(match_summary)) {
+    cat(sprintf("    %s: %d (%.1f%%)\n", 
+                mt, match_summary[mt], 
+                match_summary[mt] / nrow(demo_data) * 100))
+  }
+  
+  n_matched <- sum(!is.na(demo_data$occupation_prestige))
+  cat(sprintf("  Total matched: %d of %d (%.1f%%)\n", 
+              n_matched, nrow(demo_data), 
+              n_matched / nrow(demo_data) * 100))
+  
+  if (n_matched > 0) {
+    cat(sprintf("  Matched prestige range: %.1f - %.1f (mean: %.1f)\n",
+                min(demo_data$occupation_prestige, na.rm = TRUE),
+                max(demo_data$occupation_prestige, na.rm = TRUE),
+                mean(demo_data$occupation_prestige, na.rm = TRUE)))
+  }
+} else {
+  demo_data$occupation_prestige <- NA
+  demo_data$prestige_match_type <- "none"
+  demo_data$prestige_matched_title <- NA
+  cat("  Occupation field not available or prestige data not loaded.\n")
+}
+
+# -----------------------------------------------------------------------------
+# Calculate Composite SES Score (Education + Occupation Prestige)
+# -----------------------------------------------------------------------------
+
+# Normalize education to 0-100 scale (0 years = 0, 20+ years = 100)
+demo_data <- demo_data %>%
+  mutate(
+    # Education score (0-100 scale)
+    # 0 years = 0, 12 years (HS) = 60, 16 years (college) = 80, 20+ years = 100
+    education_score = case_when(
+      is.na(education_years) ~ NA_real_,
+      education_years <= 0 ~ 0,
+      education_years >= 20 ~ 100,
+      TRUE ~ pmin(100, education_years * 5)  # 5 points per year, max 100
+    ),
+    
+    # Occupation prestige is already on ~20-90 scale, normalize to 0-100
+    occupation_score = case_when(
+      is.na(occupation_prestige) ~ NA_real_,
+      TRUE ~ (occupation_prestige - 15) / (90 - 15) * 100  # Rescale 15-90 to 0-100
+    ),
+    occupation_score = pmax(0, pmin(100, occupation_score)),  # Clamp to 0-100
+    
+    # Composite SES score (weighted average)
+    # If both available: 50% education + 50% occupation
+    # If only education: 100% education
+    # If only occupation: 100% occupation
+    ses_composite = case_when(
+      !is.na(education_score) & !is.na(occupation_score) ~ 
+        (education_score * 0.5) + (occupation_score * 0.5),
+      !is.na(education_score) ~ education_score,
+      !is.na(occupation_score) ~ occupation_score,
+      TRUE ~ 50  # Default to middle if nothing available
+    ),
+    
+    # SES category based on composite score
+    # Lower: 0-40, Middle: 40-65, Upper: 65+
+    ses_category = case_when(
+      ses_composite < 40 ~ "lower",
+      ses_composite < 65 ~ "middle",
+      TRUE ~ "upper"
+    )
+  )
+
+# Report composite SES statistics
+cat("\nComposite SES Score Statistics:\n")
+cat(sprintf("  Mean composite SES: %.1f\n", mean(demo_data$ses_composite, na.rm = TRUE)))
+cat(sprintf("  Range: %.1f - %.1f\n", 
+            min(demo_data$ses_composite, na.rm = TRUE),
+            max(demo_data$ses_composite, na.rm = TRUE)))
+
+ses_breakdown <- demo_data %>%
+  group_by(ses_category) %>%
+  summarise(
+    n = n(),
+    mean_education = mean(education_years, na.rm = TRUE),
+    mean_prestige = mean(occupation_prestige, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\nSES Category Breakdown:\n")
+for (i in 1:nrow(ses_breakdown)) {
+  cat(sprintf("  %s: %d (avg edu: %.1f yrs, avg prestige: %.1f)\n",
+              ses_breakdown$ses_category[i],
+              ses_breakdown$n[i],
+              ses_breakdown$mean_education[i],
+              ses_breakdown$mean_prestige[i]))
+}
+
+# Print stakeholder breakdown
+stakeholder_summary <- demo_data %>%
+  group_by(stakeholder_type) %>%
+  summarise(n = n(), .groups = "drop")
+
+cat("\nStakeholder Breakdown:\n")
+for (i in 1:nrow(stakeholder_summary)) {
+  cat(sprintf("  %s: %d\n", 
+              stakeholder_summary$stakeholder_type[i],
+              stakeholder_summary$n[i]))
+}
+
+# Print severity breakdown for PWA
+severity_summary <- demo_data %>%
+  filter(stakeholder_type == "PWA") %>%
+  group_by(aphasia_severity) %>%
+  summarise(n = n(), .groups = "drop")
+
+cat("\nAphasia Severity (PWA only):\n")
+for (i in 1:nrow(severity_summary)) {
+  cat(sprintf("  %s: %d\n",
+              severity_summary$aphasia_severity[i],
+              severity_summary$n[i]))
+}
+
+# Print pair status
+if (n_valid_pairs > 0) {
+  cat(sprintf("\nPaired participants: %d (in %d pairs)\n", 
+              sum(demo_data$is_in_valid_pair), n_valid_pairs))
+}
+
+# ==============================================================================
+# SECTION 7: CALCULATE AND APPLY WEIGHTS
+# ==============================================================================
+
+cat("\nCALCULATING WEIGHTS\n")
+cat(strrep("-", 40), "\n")
+
+# Calculate weights for each participant
+demo_data <- demo_data %>%
+  mutate(
+    # Start with base weight
+    weight = 1.0,
+    
+    # Age weight
+    age_weight = case_when(
+      age >= 75 ~ AGE_WEIGHTS$age_75_plus,
+      age >= 70 ~ AGE_WEIGHTS$age_70_74,
+      age >= 65 ~ AGE_WEIGHTS$age_65_69,
+      age >= 60 ~ AGE_WEIGHTS$age_60_64,
+      age >= 55 ~ AGE_WEIGHTS$age_55_59,
+      TRUE ~ AGE_WEIGHTS$age_under_55
+    ),
+    
+    # Race/ethnicity weight
+    race_weight = case_when(
+      race_category == "Black" ~ RACE_WEIGHTS$black,
+      race_category == "Asian" ~ RACE_WEIGHTS$asian,
+      is_hispanic ~ RACE_WEIGHTS$hispanic,
+      race_category == "Native American" ~ RACE_WEIGHTS$native_american,
+      race_category == "Pacific Islander" ~ RACE_WEIGHTS$pacific_islander,
+      race_category == "Multiracial" ~ RACE_WEIGHTS$multiracial,
+      TRUE ~ RACE_WEIGHTS$white_non_hispanic
+    ),
+    
+    # Urban/rural weight
+    urban_weight = case_when(
+      urban_rural == "urban" ~ URBAN_WEIGHTS$urban,
+      urban_rural == "rural" ~ URBAN_WEIGHTS$rural,
+      TRUE ~ URBAN_WEIGHTS$unknown
+    ),
+    
+    # Region weight
+    region_weight = case_when(
+      region == "southeast" ~ REGION_WEIGHTS$southeast,
+      region == "midwest" ~ REGION_WEIGHTS$midwest,
+      region == "west" ~ REGION_WEIGHTS$west,
+      region == "northeast" ~ REGION_WEIGHTS$northeast,
+      TRUE ~ REGION_WEIGHTS$other
+    ),
+    
+    # SES weight
+    ses_weight = case_when(
+      ses_category == "lower" ~ SES_WEIGHTS$lower,
+      ses_category == "middle" ~ SES_WEIGHTS$middle,
+      TRUE ~ SES_WEIGHTS$upper
+    ),
+    
+    # Stakeholder weight
+    stakeholder_weight = case_when(
+      stakeholder_type == "PWA" ~ STAKEHOLDER_WEIGHTS$pwa,
+      stakeholder_type == "Family/Caregiver" ~ STAKEHOLDER_WEIGHTS$caregiver,
+      TRUE ~ 1.0
+    ),
+    
+    # Pair weight boost (pairs get slightly higher weight to encourage selection)
+    pair_weight = ifelse(is_in_valid_pair, PAIR_CONFIG$pair_weight_boost, 1.0),
+    
+    # Calculate final weight
+    weight = age_weight * race_weight * urban_weight * region_weight * ses_weight * stakeholder_weight * pair_weight
+  )
+
+# Adjust weights based on previous waves if needed
+if (previous_data$total_selected > 0) {
+  previous_stats <- previous_data$all_selected %>%
+    summarise(
+      n = n(),
+      pct_60_plus = mean(is_60_plus),
+      pct_minority = mean(is_non_white),
+      pct_male = mean(sex_clean == "Male"),
+      pct_pwa = mean(stakeholder_type == "PWA"),
+      .groups = "drop"
+    )
+  
+  cat("\nAdjusting weights based on previous waves:\n")
+  
+  # Boost age 60+ if below target
+  if (previous_stats$pct_60_plus < OVERALL_TARGETS$min_age_60_plus_pct) {
+    demo_data <- demo_data %>%
+      mutate(weight = ifelse(is_60_plus, weight * 1.5, weight))
+    cat("  → Boosting 60+ weights (currently at", 
+        sprintf("%.1f%%)\n", previous_stats$pct_60_plus * 100))
+  }
+  
+  # Boost minorities if below target
+  if (previous_stats$pct_minority < OVERALL_TARGETS$min_minorities_pct) {
+    demo_data <- demo_data %>%
+      mutate(weight = ifelse(is_non_white, weight * 1.5, weight))
+    cat("  → Boosting minority weights (currently at",
+        sprintf("%.1f%%)\n", previous_stats$pct_minority * 100))
+  }
+  
+  # Adjust sex balance
+  if (previous_stats$pct_male < 0.45) {
+    demo_data <- demo_data %>%
+      mutate(weight = ifelse(sex_clean == "Male", weight * 1.5, weight))
+    cat("  → Boosting male weights\n")
+  } else if (previous_stats$pct_male > 0.55) {
+    demo_data <- demo_data %>%
+      mutate(weight = ifelse(sex_clean == "Female", weight * 1.5, weight))
+    cat("  → Boosting female weights\n")
+  }
+  
+  # Adjust PWA/caregiver balance if needed
+  if (previous_stats$pct_pwa < 0.50) {
+    demo_data <- demo_data %>%
+      mutate(weight = ifelse(stakeholder_type == "PWA", weight * 1.3, weight))
+    cat("  → Boosting PWA weights (currently at",
+        sprintf("%.1f%%)\n", previous_stats$pct_pwa * 100))
+  } else if (previous_stats$pct_pwa > 0.70) {
+    demo_data <- demo_data %>%
+      mutate(weight = ifelse(stakeholder_type == "Family/Caregiver", weight * 1.3, weight))
+    cat("  → Boosting caregiver weights\n")
+  }
+}
+
+cat(sprintf("\nReady to select from %d eligible participants\n", nrow(demo_data)))
+if (n_valid_pairs > 0) {
+  cat(sprintf("  (including %d valid PWA-Family pairs)\n", n_valid_pairs))
+}
+
+# ==============================================================================
+# SECTION 8: PERFORM SELECTION (WITH PAIR HANDLING)
+# ==============================================================================
+
+cat("\n")
+cat(strrep("═", 80), "\n")
+cat("   SELECTING PARTICIPANTS\n")
+cat(strrep("═", 80), "\n\n")
+
+set.seed(12121 + CURRENT_WAVE * 100)  # Reproducible but different each wave
+
+wave_selected <- data.frame()
+pool_remaining <- demo_data
+
+# Create a function to select a participant and their pair partner if applicable
+select_with_pair <- function(pool, selected_id) {
+  # Get the selected participant
+  selected <- pool %>% filter(record_id == selected_id)
+  
+  # Check if they're in a valid pair
+  if (selected$is_in_valid_pair[1] && PAIR_CONFIG$enable_pair_linking) {
+    # Get their pair partner
+    pair_id <- selected$pair_id[1]
+    pair_members <- pool %>% filter(pair_id == !!pair_id)
+    return(pair_members)
+  } else {
+    return(selected)
+  }
+}
+
+# Track pairs already selected in this group
+for (i in 1:length(CURRENT_WAVE_SPEC$groups)) {
+  group_num <- CURRENT_WAVE_SPEC$groups[i]
+  group_size <- CURRENT_WAVE_SPEC$group_sizes[i]
+  
+  cat(sprintf("Selecting Group %d (target n=%d)...\n", group_num, group_size))
+  
+  # Diversity requirements based on group size
+  if (group_size <= 6) {
+    min_60_plus <- 4
+    min_minority <- 3
+    min_male <- 2
+    min_female <- 2
+    min_pwa <- 3  # At least half should be PWA
+  } else {
+    min_60_plus <- 5
+    min_minority <- 3
+    min_male <- 2
+    min_female <- 2
+    min_pwa <- 4  # At least half should be PWA
+  }
+  
+  # Try multiple times to get a diverse group
+  best_group <- NULL
+  best_score <- -1
+  
+  for (attempt in 1:200) {
+    if (nrow(pool_remaining) < group_size) {
+      cat("  Not enough participants remaining!\n")
+      break
+    }
+    
+    # Build candidate group
+    candidate_group <- data.frame()
+    temp_pool <- pool_remaining
+    pairs_in_group <- 0
+    
+    while (nrow(candidate_group) < group_size && nrow(temp_pool) > 0) {
+      # Calculate how many more we need
+      spots_remaining <- group_size - nrow(candidate_group)
+      
+      # Sample one person
+      if (nrow(temp_pool) == 0) break
+      
+      # Adjust weights to avoid selecting more pairs than allowed
+      selection_pool <- temp_pool
+      if (pairs_in_group >= PAIR_CONFIG$max_pairs_per_group) {
+        # Reduce weight of paired individuals if we've hit max pairs
+        selection_pool <- selection_pool %>%
+          mutate(weight = ifelse(is_in_valid_pair, weight * 0.1, weight))
+      }
+      
+      # Also check if selecting a pair would exceed group size
+      selection_pool <- selection_pool %>%
+        mutate(
+          # Check if this person's pair would fit
+          pair_size = ifelse(is_in_valid_pair, 2, 1),
+          can_fit = pair_size <= spots_remaining,
+          weight = ifelse(can_fit, weight, weight * 0.01)  # Heavily penalize if won't fit
+        )
+      
+      selected_idx <- sample(1:nrow(selection_pool), 
+                             size = 1,
+                             prob = selection_pool$weight)
+      
+      selected_id <- selection_pool$record_id[selected_idx]
+      
+      # Get selected person (and their pair partner if applicable)
+      selected_people <- select_with_pair(temp_pool, selected_id)
+      
+      # Check if adding this selection would exceed group size
+      if (nrow(candidate_group) + nrow(selected_people) <= group_size) {
+        candidate_group <- bind_rows(candidate_group, selected_people)
+        
+        # Track if we added a pair
+        if (nrow(selected_people) == 2) {
+          pairs_in_group <- pairs_in_group + 1
+        }
+      }
+      
+      # Remove from temp pool
+      temp_pool <- temp_pool %>% 
+        filter(!(record_id %in% selected_people$record_id))
+    }
+    
+    # If we couldn't fill the group, try again
+    if (nrow(candidate_group) < group_size - 1) next  # Allow being 1 short due to pairs
+    
+    # Score the group on diversity criteria
+    score <- 0
+    if (sum(candidate_group$is_60_plus) >= min_60_plus) score <- score + 1
+    if (sum(candidate_group$is_non_white) >= min_minority) score <- score + 1
+    if (sum(candidate_group$sex_clean == "Male") >= min_male) score <- score + 1
+    if (sum(candidate_group$sex_clean == "Female") >= min_female) score <- score + 1
+    if (sum(candidate_group$stakeholder_type == "PWA") >= min_pwa) score <- score + 1
+    
+    # Bonus for including pairs (encourages pair selection)
+    if (pairs_in_group > 0) score <- score + 0.5
+    
+    # Keep best group
+    if (score > best_score) {
+      best_group <- candidate_group
+      best_score <- score
+      if (score >= 5) break  # Good enough
+    }
+  }
+  
+  # Add group number
+  best_group$focus_group <- group_num
+  
+  # Count pairs in this group
+  pairs_selected <- sum(best_group$is_in_valid_pair) / 2
+  
+  # Print group summary
+  cat(sprintf("  → %d participants: %d age 60+, %d minorities, %d PWA, %d male/%d female\n",
+              nrow(best_group),
+              sum(best_group$is_60_plus),
+              sum(best_group$is_non_white),
+              sum(best_group$stakeholder_type == "PWA"),
+              sum(best_group$sex_clean == "Male"),
+              sum(best_group$sex_clean == "Female")))
+  
+  # Print pair info
+  if (pairs_selected > 0) {
+    cat(sprintf("     PWA-Family pairs included: %d\n", pairs_selected))
+    pair_names <- best_group %>%
+      filter(is_in_valid_pair) %>%
+      group_by(pair_id) %>%
+      summarise(names = paste(first_name, collapse = " & "), .groups = "drop")
+    for (j in 1:nrow(pair_names)) {
+      cat(sprintf("       • %s\n", pair_names$names[j]))
+    }
+  }
+  
+  # Print severity breakdown for this group
+  pwa_in_group <- best_group %>% filter(stakeholder_type == "PWA")
+  if (nrow(pwa_in_group) > 0) {
+    severity_counts <- table(pwa_in_group$aphasia_severity)
+    cat(sprintf("     Severity: %s\n", 
+                paste(names(severity_counts), severity_counts, sep=":", collapse=", ")))
+  }
+  
+  cat(sprintf("  Diversity score: %.1f/5\n", best_score))
+  
+  # Add to wave selection
+  wave_selected <- bind_rows(wave_selected, best_group)
+  
+  # Remove from pool
+  pool_remaining <- pool_remaining[!(pool_remaining$record_id %in% best_group$record_id), ]
+}
+
+# ==============================================================================
+# SECTION 9: CALCULATE WAVE STATISTICS
+# ==============================================================================
+
+cat("\n")
+cat(strrep("═", 80), "\n")
+cat("   WAVE SUMMARY\n")
+cat(strrep("═", 80), "\n\n")
+
+# Calculate wave statistics
+wave_stats <- wave_selected %>%
+  summarise(
+    n = n(),
+    n_60_plus = sum(is_60_plus),
+    pct_60_plus = mean(is_60_plus) * 100,
+    n_minority = sum(is_non_white),
+    pct_minority = mean(is_non_white) * 100,
+    n_male = sum(sex_clean == "Male"),
+    n_female = sum(sex_clean == "Female"),
+    n_urban = sum(urban_rural == "urban"),
+    pct_urban = mean(urban_rural == "urban") * 100,
+    # Stakeholder breakdown
+    n_pwa = sum(stakeholder_type == "PWA"),
+    pct_pwa = mean(stakeholder_type == "PWA") * 100,
+    n_caregiver = sum(stakeholder_type == "Family/Caregiver"),
+    pct_caregiver = mean(stakeholder_type == "Family/Caregiver") * 100,
+    # Pair stats
+    n_in_pairs = sum(is_in_valid_pair),
+    n_pairs = sum(is_in_valid_pair) / 2,
+    # Region breakdowns
+    n_southeast = sum(region == "southeast"),
+    pct_southeast = mean(region == "southeast") * 100,
+    n_northeast = sum(region == "northeast"),
+    pct_northeast = mean(region == "northeast") * 100,
+    n_midwest = sum(region == "midwest"),
+    pct_midwest = mean(region == "midwest") * 100,
+    n_west = sum(region == "west"),
+    pct_west = mean(region == "west") * 100,
+    # SES breakdowns
+    n_lower_ses = sum(ses_category == "lower"),
+    pct_lower_ses = mean(ses_category == "lower") * 100,
+    n_middle_ses = sum(ses_category == "middle"),
+    pct_middle_ses = mean(ses_category == "middle") * 100,
+    n_upper_ses = sum(ses_category == "upper"),
+    pct_upper_ses = mean(ses_category == "upper") * 100
+  )
+
+cat(sprintf("Participants selected: %d\n", wave_stats$n))
+cat(sprintf("  60+: %d (%.1f%%)\n", wave_stats$n_60_plus, wave_stats$pct_60_plus))
+cat(sprintf("  Minorities: %d (%.1f%%)\n", wave_stats$n_minority, wave_stats$pct_minority))
+cat(sprintf("  Male/Female: %d/%d\n", wave_stats$n_male, wave_stats$n_female))
+cat(sprintf("  Urban: %d (%.1f%%)\n", wave_stats$n_urban, wave_stats$pct_urban))
+
+cat(sprintf("\n  Stakeholder Type:\n"))
+cat(sprintf("    PWA: %d (%.1f%%)\n", wave_stats$n_pwa, wave_stats$pct_pwa))
+cat(sprintf("    Family/Caregiver: %d (%.1f%%)\n", wave_stats$n_caregiver, wave_stats$pct_caregiver))
+
+# NEW: Pair statistics
+if (wave_stats$n_pairs > 0) {
+  cat(sprintf("\n  PWA-Family Pairs:\n"))
+  cat(sprintf("    Pairs included: %.0f\n", wave_stats$n_pairs))
+  cat(sprintf("    Individuals in pairs: %d (%.1f%% of total)\n", 
+              wave_stats$n_in_pairs, wave_stats$n_in_pairs / wave_stats$n * 100))
+}
+
+# Severity breakdown for PWA
+pwa_severity <- wave_selected %>%
+  filter(stakeholder_type == "PWA") %>%
+  group_by(aphasia_severity) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(pct = n / sum(n) * 100)
+
+cat(sprintf("\n  Aphasia Severity (PWA only):\n"))
+for (i in 1:nrow(pwa_severity)) {
+  cat(sprintf("    %s: %d (%.1f%%)\n",
+              pwa_severity$aphasia_severity[i],
+              pwa_severity$n[i],
+              pwa_severity$pct[i]))
+}
+
+cat(sprintf("\n  Regions:\n"))
+cat(sprintf("    Southeast: %d (%.1f%%)\n", wave_stats$n_southeast, wave_stats$pct_southeast))
+cat(sprintf("    Northeast: %d (%.1f%%)\n", wave_stats$n_northeast, wave_stats$pct_northeast))
+cat(sprintf("    Midwest: %d (%.1f%%)\n", wave_stats$n_midwest, wave_stats$pct_midwest))
+cat(sprintf("    West: %d (%.1f%%)\n", wave_stats$n_west, wave_stats$pct_west))
+
+cat(sprintf("\n  SES Distribution:\n"))
+cat(sprintf("    Lower: %d (%.1f%%)\n", wave_stats$n_lower_ses, wave_stats$pct_lower_ses))
+cat(sprintf("    Middle: %d (%.1f%%)\n", wave_stats$n_middle_ses, wave_stats$pct_middle_ses))
+cat(sprintf("    Upper: %d (%.1f%%)\n", wave_stats$n_upper_ses, wave_stats$pct_upper_ses))
+
+# ==============================================================================
+# SECTION 10: SAVE OUTPUTS
+# ==============================================================================
+
+cat("\n")
+cat(strrep("═", 80), "\n")
+cat("   SAVING FILES\n")
+cat(strrep("═", 80), "\n\n")
+
+# Create output directory
+if (!dir.exists("output")) {
+  dir.create("output")
+}
+
+# Create wave-specific directory
+wave_dir <- sprintf("output/wave%d", CURRENT_WAVE)
+if (!dir.exists(wave_dir)) {
+  dir.create(wave_dir)
+}
+
+# 1. Save wave participants with all demographics (including pair info and SES details)
+wave_file <- sprintf("%s/wave%d_participants.csv", wave_dir, CURRENT_WAVE)
+write.csv(wave_selected %>%
+            arrange(focus_group, last_name, first_name) %>%
+            select(focus_group, record_id, first_name, last_name, age, sex_clean,
+                   race_category, is_hispanic, region, urban_rural, ses_category,
+                   education_years, occupation_raw, occupation_prestige, 
+                   prestige_match_type, ses_composite,  # New SES fields
+                   stakeholder_type, aphasia_severity,
+                   is_in_valid_pair, pair_id, paired_with_name,  # Pair info
+                   email, phone, city, state),
+          wave_file, row.names = FALSE)
+cat(sprintf("✓ Saved: %s\n", wave_file))
+
+# 2. Save individual group rosters
+for (group_num in CURRENT_WAVE_SPEC$groups) {
+  group_roster <- wave_selected %>%
+    filter(focus_group == group_num) %>%
+    select(record_id, first_name, last_name, age, sex_clean,
+           race_category, stakeholder_type, aphasia_severity,
+           is_in_valid_pair, pair_id, paired_with_name,  # Pair info
+           email, phone, city, state) %>%
+    arrange(desc(is_in_valid_pair), pair_id, last_name, first_name)  # Pairs listed together
+  
+  roster_file <- sprintf("%s/group_%02d_roster.csv", wave_dir, group_num)
+  write.csv(group_roster, roster_file, row.names = FALSE)
+}
+cat(sprintf("✓ Saved: Group rosters for groups %s\n", 
+            paste(CURRENT_WAVE_SPEC$groups, collapse = ", ")))
+
+# 3. Save pair summary report
+if (wave_stats$n_pairs > 0) {
+  pair_report <- wave_selected %>%
+    filter(is_in_valid_pair) %>%
+    arrange(pair_id, desc(stakeholder_type == "PWA")) %>%  # PWA first in each pair
+    select(focus_group, pair_id, record_id, first_name, last_name, 
+           stakeholder_type, aphasia_severity, paired_with_name, email, phone)
+  
+  pair_file <- sprintf("%s/wave%d_pairs.csv", wave_dir, CURRENT_WAVE)
+  write.csv(pair_report, pair_file, row.names = FALSE)
+  cat(sprintf("✓ Saved: %s\n", pair_file))
+}
+
+# 4. Update frozen participants list
+new_frozen <- data.frame(
+  record_id = wave_selected$record_id,
+  wave_selected = CURRENT_WAVE
+)
+
+if (exists("frozen_data")) {
+  frozen_df <- bind_rows(frozen_data, new_frozen)
+} else {
+  frozen_df <- new_frozen
+}
+
+write.csv(frozen_df, FROZEN_PARTICIPANTS_FILE, row.names = FALSE)
+cat("✓ Updated: frozen_participants.csv\n")
+
+# 5. Update previous waves data
+all_selected_cumulative <- bind_rows(previous_data$all_selected, wave_selected)
+
+previous_data_updated <- list(
+  last_wave = CURRENT_WAVE,
+  total_selected = nrow(all_selected_cumulative),
+  all_selected = all_selected_cumulative,
+  frozen_ids = all_selected_cumulative$record_id
+)
+
+saveRDS(previous_data_updated, PREVIOUS_WAVES_FILE)
+cat("✓ Saved: previous_waves_data.rds\n")
+
+# 6. Save cumulative master list
+master_file <- "output/all_participants_cumulative.csv"
+write.csv(all_selected_cumulative %>%
+            arrange(focus_group, last_name, first_name) %>%
+            select(focus_group, record_id, first_name, last_name, age, sex_clean,
+                   race_category, is_hispanic, region, urban_rural, ses_category,
+                   education_years, occupation_raw, occupation_prestige,
+                   prestige_match_type, ses_composite,  # New SES fields
+                   stakeholder_type, aphasia_severity,
+                   is_in_valid_pair, pair_id, paired_with_name,  # Pair info
+                   email, phone, city, state),
+          master_file, row.names = FALSE)
+cat(sprintf("✓ Updated: all_participants_cumulative.csv (%d total)\n", 
+            nrow(all_selected_cumulative)))
+
+# 7. Save comprehensive wave summary report
+wave_report <- data.frame(
+  Wave = CURRENT_WAVE,
+  Groups = paste(CURRENT_WAVE_SPEC$groups, collapse = ", "),
+  Participants = wave_stats$n,
+  Age_60_Plus = sprintf("%d (%.1f%%)", wave_stats$n_60_plus, wave_stats$pct_60_plus),
+  Minorities = sprintf("%d (%.1f%%)", wave_stats$n_minority, wave_stats$pct_minority),
+  Male_Female = sprintf("%d/%d", wave_stats$n_male, wave_stats$n_female),
+  PWA = sprintf("%d (%.1f%%)", wave_stats$n_pwa, wave_stats$pct_pwa),
+  Caregivers = sprintf("%d (%.1f%%)", wave_stats$n_caregiver, wave_stats$pct_caregiver),
+  PWA_Family_Pairs = sprintf("%.0f", wave_stats$n_pairs),  # NEW
+  Urban = sprintf("%d (%.1f%%)", wave_stats$n_urban, wave_stats$pct_urban),
+  Southeast = sprintf("%d (%.1f%%)", wave_stats$n_southeast, wave_stats$pct_southeast),
+  Northeast = sprintf("%d (%.1f%%)", wave_stats$n_northeast, wave_stats$pct_northeast),
+  Midwest = sprintf("%d (%.1f%%)", wave_stats$n_midwest, wave_stats$pct_midwest),
+  West = sprintf("%d (%.1f%%)", wave_stats$n_west, wave_stats$pct_west),
+  Lower_SES = sprintf("%d (%.1f%%)", wave_stats$n_lower_ses, wave_stats$pct_lower_ses),
+  Middle_SES = sprintf("%d (%.1f%%)", wave_stats$n_middle_ses, wave_stats$pct_middle_ses),
+  Upper_SES = sprintf("%d (%.1f%%)", wave_stats$n_upper_ses, wave_stats$pct_upper_ses)
+)
+
+summary_file <- "output/wave_summary_report.csv"
+if (file.exists(summary_file) && CURRENT_WAVE > 1) {
+  existing_summary <- read.csv(summary_file)
+  updated_summary <- rbind(existing_summary, wave_report)
+  write.csv(updated_summary, summary_file, row.names = FALSE)
+} else {
+  write.csv(wave_report, summary_file, row.names = FALSE)
+}
+cat("✓ Updated: wave_summary_report.csv\n")
+
+# 8. Save severity breakdown report
+severity_report <- wave_selected %>%
+  group_by(focus_group, stakeholder_type, aphasia_severity) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pivot_wider(names_from = aphasia_severity, values_from = n, values_fill = 0)
+
+severity_file <- sprintf("%s/wave%d_severity_breakdown.csv", wave_dir, CURRENT_WAVE)
+write.csv(severity_report, severity_file, row.names = FALSE)
+cat("✓ Created: severity_breakdown.csv\n")
+
+# 9. Save SES breakdown report (with prestige scores)
+ses_report <- wave_selected %>%
+  group_by(focus_group, ses_category) %>%
+  summarise(
+    n = n(),
+    mean_education_years = round(mean(education_years, na.rm = TRUE), 1),
+    mean_prestige_score = round(mean(occupation_prestige, na.rm = TRUE), 1),
+    mean_composite_ses = round(mean(ses_composite, na.rm = TRUE), 1),
+    .groups = "drop"
+  ) %>%
+  arrange(focus_group, ses_category)
+
+ses_file <- sprintf("%s/wave%d_ses_breakdown.csv", wave_dir, CURRENT_WAVE)
+write.csv(ses_report, ses_file, row.names = FALSE)
+cat("✓ Created: ses_breakdown.csv\n")
+
+# 10. Save occupation matching report (for review)
+occupation_report <- wave_selected %>%
+  select(record_id, first_name, last_name, occupation_raw, 
+         prestige_matched_title, occupation_prestige, prestige_match_type,
+         education_years, ses_composite, ses_category) %>%
+  arrange(desc(ses_composite))
+
+occupation_file <- sprintf("%s/wave%d_occupation_prestige.csv", wave_dir, CURRENT_WAVE)
+write.csv(occupation_report, occupation_file, row.names = FALSE)
+cat("✓ Created: occupation_prestige.csv\n")
+
+# ==============================================================================
+# SECTION 11: CUMULATIVE SUMMARY
+# ==============================================================================
+
+cat("\n")
+cat(strrep("═", 80), "\n")
+cat("   CUMULATIVE PROGRESS\n")
+cat(strrep("═", 80), "\n\n")
+
+# Calculate cumulative statistics
+cumulative_stats <- all_selected_cumulative %>%
+  summarise(
+    total_n = n(),
+    n_60_plus = sum(is_60_plus),
+    pct_60_plus = mean(is_60_plus) * 100,
+    n_minority = sum(is_non_white),
+    pct_minority = mean(is_non_white) * 100,
+    n_male = sum(sex_clean == "Male"),
+    n_female = sum(sex_clean == "Female"),
+    pct_male = mean(sex_clean == "Male") * 100,
+    n_urban = sum(urban_rural == "urban"),
+    pct_urban = mean(urban_rural == "urban") * 100,
+    n_pwa = sum(stakeholder_type == "PWA"),
+    pct_pwa = mean(stakeholder_type == "PWA") * 100,
+    n_caregiver = sum(stakeholder_type == "Family/Caregiver"),
+    pct_caregiver = mean(stakeholder_type == "Family/Caregiver") * 100,
+    # Pair stats
+    n_in_pairs = sum(is_in_valid_pair),
+    n_pairs = sum(is_in_valid_pair) / 2,
+    # All regions
+    n_southeast = sum(region == "southeast"),
+    pct_southeast = mean(region == "southeast") * 100,
+    n_northeast = sum(region == "northeast"),
+    pct_northeast = mean(region == "northeast") * 100,
+    n_midwest = sum(region == "midwest"),
+    pct_midwest = mean(region == "midwest") * 100,
+    n_west = sum(region == "west"),
+    pct_west = mean(region == "west") * 100,
+    # SES categories
+    n_lower_ses = sum(ses_category == "lower"),
+    pct_lower_ses = mean(ses_category == "lower") * 100,
+    n_middle_ses = sum(ses_category == "middle"),
+    pct_middle_ses = mean(ses_category == "middle") * 100,
+    n_upper_ses = sum(ses_category == "upper"),
+    pct_upper_ses = mean(ses_category == "upper") * 100
+  )
+
+cat(sprintf("Total participants: %d of 100\n", cumulative_stats$total_n))
+cat(sprintf("  60+: %d (%.1f%%) - Target: ≥80%%\n", 
+            cumulative_stats$n_60_plus, cumulative_stats$pct_60_plus))
+cat(sprintf("  Minorities: %d (%.1f%%) - Target: ≥55%%\n", 
+            cumulative_stats$n_minority, cumulative_stats$pct_minority))
+cat(sprintf("  Male/Female: %d/%d (%.0f%%/%.0f%%) - Target: 50/50\n",
+            cumulative_stats$n_male, cumulative_stats$n_female,
+            cumulative_stats$pct_male, 100 - cumulative_stats$pct_male))
+
+cat(sprintf("\n  Stakeholder Mix:\n"))
+cat(sprintf("    PWA: %d (%.1f%%)\n", cumulative_stats$n_pwa, cumulative_stats$pct_pwa))
+cat(sprintf("    Family/Caregiver: %d (%.1f%%)\n", 
+            cumulative_stats$n_caregiver, cumulative_stats$pct_caregiver))
+
+# NEW: Cumulative pair statistics
+if (cumulative_stats$n_pairs > 0) {
+  cat(sprintf("\n  PWA-Family Pairs (Cumulative):\n"))
+  cat(sprintf("    Total pairs: %.0f\n", cumulative_stats$n_pairs))
+  cat(sprintf("    Individuals in pairs: %d (%.1f%% of total)\n",
+              cumulative_stats$n_in_pairs, 
+              cumulative_stats$n_in_pairs / cumulative_stats$total_n * 100))
+}
+
+# Cumulative severity for PWA
+cumulative_pwa_severity <- all_selected_cumulative %>%
+  filter(stakeholder_type == "PWA") %>%
+  group_by(aphasia_severity) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(pct = n / sum(n) * 100)
+
+if (nrow(cumulative_pwa_severity) > 0) {
+  cat(sprintf("\n  Aphasia Severity (All PWA):\n"))
+  for (i in 1:nrow(cumulative_pwa_severity)) {
+    cat(sprintf("    %s: %d (%.1f%%)\n",
+                cumulative_pwa_severity$aphasia_severity[i],
+                cumulative_pwa_severity$n[i],
+                cumulative_pwa_severity$pct[i]))
+  }
+}
+
+cat(sprintf("\n  Geographic Distribution:\n"))
+cat(sprintf("    Urban: %d (%.1f%%) - Target: ≥80%%\n",
+            cumulative_stats$n_urban, cumulative_stats$pct_urban))
+cat(sprintf("    Southeast: %d (%.1f%%) - Target: ≥30%%\n",
+            cumulative_stats$n_southeast, cumulative_stats$pct_southeast))
+cat(sprintf("    Northeast: %d (%.1f%%) - Target: ≤15%%\n",
+            cumulative_stats$n_northeast, cumulative_stats$pct_northeast))
+cat(sprintf("    Midwest: %d (%.1f%%)\n",
+            cumulative_stats$n_midwest, cumulative_stats$pct_midwest))
+cat(sprintf("    West: %d (%.1f%%)\n",
+            cumulative_stats$n_west, cumulative_stats$pct_west))
+
+cat(sprintf("\n  SES Distribution (Composite: Education + Occupation Prestige):\n"))
+cat(sprintf("    Lower: %d (%.1f%%) - Target: ≥40%%\n",
+            cumulative_stats$n_lower_ses, cumulative_stats$pct_lower_ses))
+cat(sprintf("    Middle: %d (%.1f%%)\n",
+            cumulative_stats$n_middle_ses, cumulative_stats$pct_middle_ses))
+cat(sprintf("    Upper: %d (%.1f%%)\n",
+            cumulative_stats$n_upper_ses, cumulative_stats$pct_upper_ses))
+
+# Show composite SES statistics
+cumulative_ses_detail <- all_selected_cumulative %>%
+  summarise(
+    mean_education = mean(education_years, na.rm = TRUE),
+    mean_prestige = mean(occupation_prestige, na.rm = TRUE),
+    mean_composite = mean(ses_composite, na.rm = TRUE),
+    n_prestige_matched = sum(!is.na(occupation_prestige))
+  )
+
+cat(sprintf("\n  SES Component Details:\n"))
+cat(sprintf("    Mean education years: %.1f\n", cumulative_ses_detail$mean_education))
+cat(sprintf("    Mean occupation prestige: %.1f (n=%d matched)\n", 
+            cumulative_ses_detail$mean_prestige, cumulative_ses_detail$n_prestige_matched))
+cat(sprintf("    Mean composite SES score: %.1f\n", cumulative_ses_detail$mean_composite))
+
+# ==============================================================================
+# SECTION 12: FINAL MESSAGES
+# ==============================================================================
+
+cat("\n")
+cat(strrep("═", 80), "\n")
+cat(sprintf("   WAVE %d COMPLETE!\n", CURRENT_WAVE))
+cat(strrep("═", 80), "\n\n")
+
+if (CURRENT_WAVE < 4) {
+  cat(sprintf("Next: Run Wave %d when you have ~%d more eligible participants\n",
+              CURRENT_WAVE + 1,
+              WAVE_SPECS[[paste0("wave", CURRENT_WAVE + 1)]]$min_eligible_needed))
+} else {
+  cat("🎉 ALL WAVES COMPLETE - 100 participants selected!\n")
+}
+
+cat(sprintf("\nFiles saved in: %s\n", wave_dir))
+
+# Pair linking reminder
+if (PAIR_CONFIG$enable_pair_linking) {
+  cat("\n")
+  cat(strrep("-", 40), "\n")
+  cat("PWA-FAMILY PAIR LINKING: ENABLED\n")
+  cat(sprintf("  Mode: %s\n", PAIR_CONFIG$pair_mode))
+  cat(sprintf("  Max pairs per group: %d\n", PAIR_CONFIG$max_pairs_per_group))
+  cat(sprintf("  Pairs selected this wave: %.0f\n", wave_stats$n_pairs))
+  cat(strrep("-", 40), "\n")
+}
+
+cat(strrep("═", 80), "\n")
+
