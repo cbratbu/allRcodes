@@ -1,0 +1,296 @@
+---
+title: "1. t-tests"
+author: "Anna Serrichio"
+date: "2026-01-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction to t-tests
+
+## What is a t-test?
+
+A t-test compares the means of two groups to determine if they are statistically different from each other. In aphasia research, we use t-tests to answer questions like:
+
+- Did naming accuracy improve from pre-treatment to post-treatment?
+- Do people with Broca's aphasia have different working memory scores than people with Wernicke's aphasia?
+- Is there a difference in treatment response between intensive vs. distributed therapy schedules?
+
+## When to Use t-tests
+
+Use t-tests when:
+
+- You have **one continuous dependent variable** (e.g., naming accuracy %, reaction time, test scores)
+- You want to compare **two groups or two time points**
+- Your data is **approximately normally distributed** (or you have n > 30 per group)
+- You have **independent observations** (each participant contributes one data point per condition)
+
+## Types of t-tests
+
+### 1. Independent Samples t-test (Between-subjects)
+Compares two different groups of participants.
+
+**Example:** Comparing naming scores between people with fluent vs. non-fluent aphasia.
+
+### 2. Paired Samples t-test (Within-subjects)
+Compares two measurements from the same participants.
+
+**Example:** Comparing pre-treatment vs. post-treatment naming accuracy in the same individuals.
+
+### 3. One-Sample t-test
+Compares a sample mean to a known population value.
+
+**Example:** Comparing your aphasia sample's cognitive scores to published norms (mean = 100).
+
+---
+
+# Required Packages
+
+```{r packages}
+# Install packages if needed (uncomment the lines below)
+# install.packages("tidyverse")
+# install.packages("effectsize")
+# install.packages("rstatix")
+# install.packages("ggplot2")
+# install.packages("ggpubr")
+
+# Load packages
+library(tidyverse)    # Data manipulation and visualization
+library(effectsize)   # Calculate effect sizes (Cohen's d)
+library(rstatix)      # Pipe-friendly stats functions
+library(ggplot2)      # Advanced plotting
+library(ggpubr)       # Publication-ready plots
+```
+
+---
+
+# Data Structure Requirements
+
+## For Independent Samples t-test
+
+Your data should be in **long format** with:
+- One row per participant
+- One column for the grouping variable (factor)
+- One column for the outcome variable (numeric)
+
+```{r indep-data-structure}
+# Example structure for independent samples
+independent_data <- data.frame(
+  participant_id = paste0("P", 1:20),
+  aphasia_type = rep(c("Fluent", "Non-fluent"), each = 10),
+  naming_accuracy = c(rnorm(10, mean = 65, sd = 12),  # Fluent group
+                      rnorm(10, mean = 52, sd = 15))  # Non-fluent group
+)
+
+head(independent_data)
+```
+
+## For Paired Samples t-test
+
+Your data can be in **wide format** (one row per participant, separate columns for each time point) or **long format** (one row per observation).
+
+```{r paired-data-structure}
+# Wide format (easier for paired t-test)
+paired_data_wide <- data.frame(
+  participant_id = paste0("P", 1:15),
+  pre_treatment = rnorm(15, mean = 55, sd = 10),
+  post_treatment = rnorm(15, mean = 68, sd = 12)
+)
+
+head(paired_data_wide)
+
+# Long format (better for plotting)
+paired_data_long <- paired_data_wide %>%
+  pivot_longer(cols = c(pre_treatment, post_treatment),
+               names_to = "timepoint",
+               values_to = "naming_accuracy")
+
+head(paired_data_long)
+```
+
+---
+
+# Running t-tests
+
+## 1. Independent Samples t-test
+
+### Check Assumptions
+
+```{r indep-assumptions}
+# 1. Check normality with Shapiro-Wilk test (p > .05 = normal)
+independent_data %>%
+  group_by(aphasia_type) %>%
+  shapiro_test(naming_accuracy)
+
+# 2. Visual check with Q-Q plot
+ggqqplot(independent_data, x = "naming_accuracy", facet.by = "aphasia_type")
+
+# 3. Check homogeneity of variance (Levene's test: p > .05 = equal variances)
+independent_data %>%
+  levene_test(naming_accuracy ~ aphasia_type)
+```
+
+### Run the t-test
+
+```{r indep-ttest}
+# Basic t-test
+t_result_indep <- independent_data %>%
+  t_test(naming_accuracy ~ aphasia_type, var.equal = TRUE) %>%
+  add_significance()  # Adds significance stars
+```
+
+### Calculate Effect Size
+
+```{r indep-effect}
+# Cohen's d (small = 0.2, medium = 0.5, large = 0.8)
+cohens_d(naming_accuracy ~ aphasia_type, 
+         data = independent_data)
+```
+
+### Visualize Results
+
+```{r indep-plot, fig.width=7, fig.height=5}
+# Create publication-ready plot
+ggplot(independent_data, aes(x = aphasia_type, y = naming_accuracy, fill = aphasia_type)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 2) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, fill = "white") +
+  labs(title = "Naming Accuracy by Aphasia Type",
+       x = "Aphasia Type",
+       y = "Naming Accuracy (%)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+---
+
+## 2. Paired Samples t-test
+
+### Check Assumptions
+
+```{r paired-assumptions}
+# 1. Check normality of DIFFERENCES
+paired_data_wide <- paired_data_wide %>%
+  mutate(difference = post_treatment - pre_treatment)
+
+shapiro_test(paired_data_wide$difference)
+
+# 2. Visual check
+ggqqplot(paired_data_wide, x = "difference")
+```
+
+### Run the t-test
+
+```{r paired-ttest}
+# Basic paired t-test
+t_result_paired <- paired_data_long %>% 
+  t_test(naming_accuracy ~ timepoint, paired = TRUE) %>%
+  add_significance()
+```
+
+### Calculate Effect Size
+
+```{r paired-effect}
+# Cohen's d for paired samples
+cohens_d(
+  data = paired_data_wide,
+  formula = post_treatment ~ pre_treatment,
+  paired = TRUE
+)
+```
+
+### Visualize Results
+
+```{r paired-plot, fig.width=7, fig.height=5}
+# Box plot with individual trajectories
+ggpaired(paired_data_long, x = "timepoint", y = "naming_accuracy",
+         color = "timepoint", palette = "jco",
+         line.color = "gray", line.size = 0.4,
+         point.size = 2) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 4, 
+               fill = "white", color = "black") +
+  labs(title = "Treatment Effect on Naming Accuracy",
+       subtitle = "Lines connect the same participant across timepoints",
+       x = "Timepoint",
+       y = "Naming Accuracy (%)") +
+  theme_minimal()
+```
+
+---
+
+## 3. One-Sample t-test
+
+### When to Use
+
+Use when comparing your sample to a known population value, such as:
+- Published normative data
+- Chance performance level
+- Theoretical baseline
+
+```{r one-sample}
+# Example: Are our participants' working memory scores different from 
+# the normative mean of 100?
+
+wm_scores <- data.frame(
+  participant_id = paste0("P", 1:20),
+  wm_score = rnorm(20, mean = 92, sd = 15)
+)
+
+# Test against population mean of 100
+t_result_one <- t.test(wm_scores, mu = 100)
+print(t_result_one)
+
+# Effect size
+cohens_d(
+  data = wm_scores,
+  formula = wm_score ~ 1,
+  mu = 100
+)
+```
+
+---
+
+# Reporting Results
+
+## APA Style Reporting Template
+
+For an **independent samples t-test**:
+
+> An independent samples t-test revealed that participants with non-fluent aphasia (M = XXX, SD = XXX) had significantly lower naming accuracy than participants with fluent aphasia (M = XXX, SD = XXX), t = [insert t value], p = [insert p value], d = [insert Cohen's d].
+
+For a **paired samples t-test**:
+
+> A paired samples t-test indicated that naming accuracy significantly improved from pre-treatment (M = XXX, SD = XXX) to post-treatment (M = XXX, SD = XXX), t = [insert t value], p = [insert p value] d = [insert Cohen's d].
+
+---
+
+# Common Issues and Solutions
+
+## Issue 1: Non-Normal Data
+
+**Solution:** Use the non-parametric **Wilcoxon test** instead (covered in the next tutorial).
+
+```{r wilcoxon-preview}
+# For independent samples: Mann-Whitney U test
+wilcox.test(naming_accuracy ~ aphasia_type, data = independent_data)
+
+# For paired samples: Wilcoxon signed-rank test
+wilcox.test(paired_data_wide$post_treatment,
+            paired_data_wide$pre_treatment,
+            paired = TRUE)
+```
+
+## Issue 2: Unequal Variances
+
+**Solution:** Use Welch's t-test (doesn't assume equal variances).
+
+```{r welch}
+# Set var.equal = FALSE
+t.test(naming_accuracy ~ aphasia_type, 
+       data = independent_data,
+       var.equal = FALSE)  
+```
+
