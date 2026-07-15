@@ -1,0 +1,235 @@
+#' ============================================================
+#' Convening 1 Priority Analysis — Main Pipeline
+#' ============================================================
+#'
+#' Usage:
+#'   setwd("path/to/aphasia-analysis")
+#'   source("main.R")
+#'
+#' Requires:
+#'   data/convening 1.csv
+#'   
+
+
+# ── Source all modules ─────────────────────────────────────
+source("R/00_config.R")
+source("R/01_load_clean.R")
+source("R/02_scoring.R")
+source("R/03_statistics.R")
+source("R/04_visualizations.R")   # all ggplot/publication figures
+source("R/05_sensitivity.R")
+source("R/06_group_comparisons.R")
+source("R/07_clinical_demographic.R")
+source("R/08_mixed_models.R")    # mixed ordinal models
+source("R/09_novel_vs_known.R")
+
+dir.create("output", showWarnings = FALSE)
+
+# ═══════════════════════════════════════════════════════════
+# 1. LOAD & SCORE
+# ═══════════════════════════════════════════════════════════
+dat            <- load_and_clean("data/convening 1.csv")
+ITEM_LABELS    <- dat$item_labels   # override with labels matched to actual columns
+results        <- score_all(dat)
+domain_means   <- compute_domain_means(dat)
+domain_summary <- summarise_domains(results)
+
+results_pwa <- results %>% filter(group == "PWA")
+results_fmc <- results %>% filter(group == "FMC")
+
+top15_pwa <- top_n_items(results_pwa, 15)
+top15_fmc <- top_n_items(results_fmc, 15)
+
+# ═══════════════════════════════════════════════════════════
+# 2. SENSITIVITY ANALYSIS
+# ═══════════════════════════════════════════════════════════
+sens_pwa <- sensitivity_rankings(results_pwa)
+sens_fmc <- sensitivity_rankings(results_fmc)
+
+sens_cor <- bind_rows(
+  sensitivity_correlations(sens_pwa, "PWA"),
+  sensitivity_correlations(sens_fmc, "FMC")
+)
+print(sens_cor)
+
+# ═══════════════════════════════════════════════════════════
+# 3. VISUALIZATIONS
+# ═══════════════════════════════════════════════════════════
+p_priority_matrix      <- plot_priority_matrix(results)
+p_domain_matrix        <- plot_domain_matrix(domain_summary)
+p_domain_bars          <- plot_domain_bars(domain_summary)
+p_difference_lollipop  <- plot_difference_lollipop(results)
+p_top15_pwa            <- plot_top_n(top15_pwa, "Top 15 Priority Items for PWA")
+p_top15_fmc            <- plot_top_n(top15_fmc, "Top 15 Priority Items for Family/Caregivers")
+p_top15_combined       <- plot_top15_combined(results)
+top15_combined_overlap_known_new = plot_top15_combined_overlap_known_new(results)
+
+print(p_priority_matrix)
+print(p_domain_matrix)
+print(p_domain_bars)
+print(p_difference_lollipop)
+print(p_top15_pwa)
+print(p_top15_fmc)
+plot_top15_venn(top15_pwa, top15_fmc)
+print(p_top15_combined)
+
+# Publication-ready figure exports
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+save_publication_plot(p_priority_matrix,     "output/figures/priority_matrix.png",      width = 7.5, height = 5.5)
+save_publication_plot(p_domain_matrix,       "output/figures/domain_priority_matrix.png", width = 7.5, height = 5.5)
+save_publication_plot(p_domain_bars,         "output/figures/domain_priority_bars.png", width = 7.0, height = 5.0)
+save_publication_plot(p_difference_lollipop, "output/figures/group_difference_lollipop.png", width = 7.5, height = 6.0)
+save_publication_plot(p_top15_pwa,           "output/figures/top15_pwa.png", width = 7.0, height = 6.0)
+save_publication_plot(p_top15_fmc,           "output/figures/top15_fmc.png", width = 7.0, height = 6.0)
+
+# ═══════════════════════════════════════════════════════════
+# 4. GROUP COMPARISONS (PWA vs Family)
+# ═══════════════════════════════════════════════════════════
+domain_tests <- domain_group_tests(domain_means)
+cat("\n--- Domain-Level Mann-Whitney U ---\n")
+print(domain_tests, n = Inf)
+cat("\n[!]", .IMPACT_OTHERS_NOTE_GRP, "\n")
+
+item_tests <- item_group_tests(dat)
+cat("\n--- Item-Level Mann-Whitney U (top 20 by p) ---\n")
+print(
+  item_tests %>% arrange(p_value) %>%
+    select(item_label, domain, statistic, rank_biserial, p_value, p_adj_fdr),
+  n = 20
+)
+cat("\n[!]", .IMPACT_OTHERS_NOTE_GRP, "\n")
+
+hp <- hp_comparison(results)
+cat("\n--- High-Priority % Comparison (top 15) ---\n")
+print(hp, n = 15)
+
+# ═══════════════════════════════════════════════════════════
+# 5. CLINICAL & DEMOGRAPHIC ASSOCIATIONS
+# ═══════════════════════════════════════════════════════════
+clin_demo <- run_clinical_demographic(dat, domain_means)
+print_clinical_demographic(clin_demo)
+p_mpo_domain_trends <- plot_mpo_domain_trends(dat, domain_means)
+p_mpo_item_trends   <- plot_mpo_top_item_trends(dat, clin_demo$mpo, top_n = 12)
+
+# ═══════════════════════════════════════════════════════════
+# 6. MIXED ORDINAL MODELS
+# ═══════════════════════════════════════════════════════════
+mixed <- run_mixed_models(dat)
+print_mixed_model_summary(mixed)
+
+
+# ═══════════════════════════════════════════════════════════
+# 7. NOVEL vs KNOWN
+# ═══════════════════════════════════════════════════════════
+novel <- run_novel_vs_known(results, dat)
+
+# ── 1. Known vs New ───────────────────────────────────────
+cat("\n--- Known vs New: Mann-Whitney ---\n")
+cat("  W =", novel$mw_known_vs_new$statistic,
+    "| p =", format.pval(novel$mw_known_vs_new$p_value, digits = 4),
+    "| r =", round(novel$mw_known_vs_new$rank_biserial, 3), "\n")
+print(novel$summary_known_vs_new)
+print(novel$item_metrics_known_vs_new)
+print(novel$top10_counts)
+cat("\n--- Overall Top 10 with Source ---\n")
+print(novel$top10 %>% select(item_label, known_new, source_type, mean_priority))
+cat("\n--- PWA Top 10 ---\n")
+print(novel$top10_pwa)
+cat("\n--- Family Top 10 ---\n")
+print(novel$top10_fmc)
+
+# ── 2. Known PR vs Known PG ───────────────────────────────
+cat("\n--- Known PR vs PG: Mann-Whitney (PR-only vs PG-only) ---\n")
+cat("  W =", novel$mw_pr_vs_pg$statistic,
+    "| p =", format.pval(novel$mw_pr_vs_pg$p_value, digits = 4),
+    "| r =", round(novel$mw_pr_vs_pg$rank_biserial, 3), "\n")
+
+cat("\n--- Known PR / PG / PR;PG: Kruskal-Wallis ---\n")
+cat("  χ² =", round(novel$kw_known_source$chi_squared, 3),
+    "| df =", novel$kw_known_source$df,
+    "| p =", format.pval(novel$kw_known_source$p_value, digits = 4), "\n")
+
+cat("\n--- Known Source Dunn Post-Hoc (Bonferroni) ---\n")
+print(novel$dunn_known_source)
+
+cat("\n--- Rating Summary by Known Source Type ---\n")
+print(novel$summary_known_source)
+
+cat("\n--- Item Metrics by Known Source Type ---\n")
+print(novel$item_metrics_known_source)
+
+# Export publication-ready statistical/association figures
+analysis_figures <- export_analysis_visualizations(
+  results = results,
+  domain_summary = domain_summary,
+  domain_tests = domain_tests,
+  item_tests = item_tests,
+  hp = hp,
+  clin_demo = clin_demo,
+  novel = novel,
+  dat = dat,
+  domain_means = domain_means,
+  mixed = mixed,
+  out_dir = "output/figures"
+)
+
+# ═══════════════════════════════════════════════════════════
+# 8. EXPORT
+# ═══════════════════════════════════════════════════════════
+full_results <- results %>%
+  select(item, item_label, domain, group, source, known_new,
+         mean_score, prevalence, high_priority, priority_score) %>%
+  arrange(group, desc(priority_score))
+
+write_csv(full_results,                    "output/full_priority_results.csv")
+write_csv(item_tests,                      "output/item_mw_tests_pwa_vs_family.csv")
+
+write_csv(clin_demo$severity_items$kw,     "output/kw_severity_items_pwa.csv")
+write_csv(clin_demo$severity_domains$kw,   "output/kw_severity_domain_pwa.csv")
+
+write_csv(clin_demo$age_group$domains$kw,  "output/kw_age_domain.csv")
+write_csv(clin_demo$age_group$items$kw,    "output/kw_age_items.csv")
+
+write_csv(clin_demo$ses$domains$kw,        "output/kw_ses_domain.csv")
+write_csv(clin_demo$ses$items$kw,          "output/kw_ses_items.csv")
+
+write_csv(clin_demo$region$domains$kw,     "output/kw_region_domain.csv")
+write_csv(clin_demo$region$items$kw,       "output/kw_region_items.csv")
+
+write_csv(clin_demo$urban$domains$kw,      "output/kw_urban_domain.csv")
+write_csv(clin_demo$urban$items$kw,        "output/kw_urban_items.csv")
+
+write_csv(clin_demo$race$domains$kw,       "output/kw_race_collapsed_domain.csv")
+write_csv(clin_demo$race$items$kw,         "output/kw_race_collapsed_items.csv")
+
+# Age: all respondents + stratified by group
+write_csv(clin_demo$age,                   "output/age_item_associations_all.csv")
+write_csv(clin_demo$age_pwa,               "output/age_item_associations_pwa.csv")
+write_csv(clin_demo$age_fmc,               "output/age_item_associations_fmc.csv")
+write_csv(clin_demo$age_domain_cor,        "output/age_domain_cor_all.csv")
+write_csv(clin_demo$age_domain_cor_pwa,    "output/age_domain_cor_pwa.csv")
+write_csv(clin_demo$age_domain_cor_fmc,    "output/age_domain_cor_fmc.csv")
+
+# MPO: PWA only
+write_csv(clin_demo$mpo,                   "output/mpo_item_associations_pwa.csv")
+write_csv(clin_demo$mpo_domain_cor,        "output/mpo_domain_cor_pwa.csv")
+
+# Mixed ordinal models
+export_mixed_model_results(mixed, "output")
+
+write_csv(sens_pwa,                        "output/sensitivity_rankings_pwa.csv")
+write_csv(sens_fmc,                        "output/sensitivity_rankings_fmc.csv")
+
+write_csv(novel$summary_known_vs_new,        "output/known_vs_new_rating_summary.csv")
+write_csv(novel$item_metrics_known_vs_new,   "output/known_vs_new_item_metrics.csv")
+write_csv(novel$top10,                       "output/known_vs_new_overall_top10.csv")
+write_csv(novel$top10_counts,                "output/known_vs_new_top10_counts.csv")
+write_csv(novel$top10_pwa,                   "output/known_vs_new_top10_pwa.csv")
+write_csv(novel$top10_fmc,                   "output/known_vs_new_top10_fmc.csv")
+write_csv(novel$mw_known_vs_new,             "output/known_vs_new_mw_test.csv")
+write_csv(novel$mw_pr_vs_pg,                 "output/known_pr_vs_pg_mw_test.csv")
+write_csv(novel$kw_known_source,             "output/known_pr_pg_kw_test.csv")
+write_csv(novel$dunn_known_source,           "output/known_pr_pg_dunn_posthoc.csv")
+write_csv(novel$summary_known_source,        "output/known_pr_pg_rating_summary.csv")
+write_csv(novel$item_metrics_known_source,   "output/known_pr_pg_item_metrics.csv")
+
